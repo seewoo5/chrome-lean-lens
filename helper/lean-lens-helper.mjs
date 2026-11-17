@@ -58,6 +58,9 @@ export const isLeanPath = (value) => typeof value === 'string' && value.length <
 
 export const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
+const NO_SANDBOX = "This system has no sandbox for a project's code, so Lean is not run: it would run with your permissions. "
+  + 'On Linux, install bubblewrap (bwrap) and check it may run here. Starting the helper with --no-sandbox runs Lean all the same.';
+
 /** Modules a Lean file imports, read from its header only (so `import` in a comment or string is not one). */
 export function importsOf(source) {
   const imports = [];
@@ -734,8 +737,11 @@ export function createHelper(options = {}) {
       GIT_TERMINAL_PROMPT: '0',
       ...extra,
     };
+    // No sandbox on this system (on Linux, bubblewrap missing or not allowed to run): the code
+    // would run with the reader's own permissions, so it does not run, unless they asked for
+    // that (`--no-sandbox`, above).
     const confinement = await sandboxKind;
-    if (!confinement) return run(command, args, { cwd, env, onLine, timeoutMs });
+    if (!confinement) throw new Error(NO_SANDBOX);
     const allowed = [home, temporary, ...writable].map(realOrSame);
     const limits = {
       network,
@@ -946,6 +952,9 @@ export function createHelper(options = {}) {
       for (const [rootDir, files] of groups) {
         const root = path.join(job.dir, rootDir);
         job.phase = 'preparing';
+        // Refused before anything is installed for it (a Lean version is some 3 GB), not at the
+        // first command that would run the project's code.
+        if (sandboxWanted && !(await sandboxKind)) throw new Error(NO_SANDBOX);
         const toolchain = await resolveToolchain(root, job);
         await ensureDependencies(root, rootDir, toolchain, job, workDir);
         await buildImports(root, files.map((file) => file.path), toolchain, job, scratch);
@@ -1251,7 +1260,7 @@ async function main() {
     : `Sandbox ${{
       seatbelt: "on: the project's code runs without network access and cannot read or change your files",
       bwrap: "on: the project's code runs without network access and sees none of your files",
-      none: 'not available on this system: Lean runs with your permissions',
+      none: 'not available on this system, so Lean will not run (install bubblewrap, or start with --no-sandbox to run it with your permissions)',
       off: 'off (--no-sandbox): Lean runs with your permissions',
     }[await helper.sandbox()]}`;
   for (const entry of values.link || []) {

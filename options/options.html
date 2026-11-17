@@ -87,7 +87,7 @@
       <!-- Section 3: Real Lean, run by the local helper -->
       <div class="card">
         <h2 class="card-title">Real Lean (Local Helper)</h2>
-        <p class="card-desc">The helper (<code>node helper/lean-lens-helper.mjs</code>) runs Lean on your machine for the pull request you are reading, so hovers and proof states are Lean's own. It prints its address and token when it starts. Elaborating a file runs the code in it, so Lean only runs when you click <strong>Run Lean</strong> in a hover, and only on repositories you have allowed. On macOS and Linux that code runs in a sandbox, without network access or access to your files. Started with <code>--codespaces</code>, the helper runs Lean in GitHub Codespaces on your account instead, and this machine keeps only the results.</p>
+        <p class="card-desc">The helper (<code>node helper/lean-lens-helper.mjs</code>) runs Lean on your machine for the pull request you are reading, so hovers and proof states are Lean's own. It prints its address and token when it starts. Elaborating a file runs the code in it, so Lean only runs when you click <strong>Run Lean</strong> in a hover, and only on repositories you have allowed. On macOS and Linux that code runs in a sandbox, without access to your files, and with the network only while the project's dependencies are fetched; where there is no sandbox, the helper does not run it unless started with <code>--no-sandbox</code>. Started with <code>--codespaces</code>, the helper runs Lean in GitHub Codespaces on your account instead, and this machine keeps only the results.</p>
 
         <div class="checkbox-group">
           <label class="checkbox-label">
