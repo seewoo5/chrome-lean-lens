@@ -1716,8 +1716,8 @@ console.log("22. Testing real Lean data (the local helper)...");
     assert.throws(() => convertModule(blocks, '#doc (Manual) "T" =>\n\n:::group "g"\nProse.\n:::\nmore'), /covers/);
 
     // --- The helper: what it accepts, and what it answers without running anything.
-    assert(helper.isRepo('seewoo5/DifferentProofs') && helper.isRepo('leanprover-community/mathlib4'));
-    for (const bad of ['../x', 'a/b/c', 'a/..', 'a', '-a/b', 'a/b c']) assert(!helper.isRepo(bad), `not a repository: ${bad}`);
+    assert(helper.isRepo('seewoo5/DifferentProofs') && helper.isRepo('leanprover-community/mathlib4') && helper.isRepo('o/.github'));
+    for (const bad of ['../x', 'a/b/c', 'a/..', 'a/.', 'a', '-a/b', 'a/b c']) assert(!helper.isRepo(bad), `not a repository: ${bad}`);
     assert(helper.isSha('1adf3d0cad950f5a9059596b4df342c38aae8353') && !helper.isSha('1adf3d0') && !helper.isSha('HEAD'));
     assert(helper.isLeanPath('A/B.lean') && helper.isLeanPath('Formal/DF_1/DF_1_2.lean'));
     for (const bad of ['../A.lean', '/abs/A.lean', 'A/../B.lean', 'A/B.txt', 'A\\B.lean', 'A//B.lean']) assert(!helper.isLeanPath(bad), `not a file path: ${bad}`);
