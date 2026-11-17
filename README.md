@@ -136,6 +136,12 @@ Running Lean on a pull request runs that pull request's code: Lean executes code
 
 The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` turns it off, which a project with private dependencies needs.
 
+Worth knowing about what you allow:
+
+- **Allowing a repository allows every pull request to it**, from forks too. What runs is the code of the pull request's author, not of the repository's owners.
+- **The click on Run Lean is checked in the GitHub tab.** A GitHub page that was itself taken over could allow a repository and start a run without one.
+- **A project chooses its Lean.** Its `lean-toolchain` may name a release from any GitHub repository; the helper installs that with elan, and the project's code runs with it.
+
 ### Good to know
 
 - A tactic shows the goals **after** it, and what it changed. The goals before the first tactic of a proof nested in another (`have h : T := by simp`) are not in Lean's recorded data, so that one shows its goals without a diff.
