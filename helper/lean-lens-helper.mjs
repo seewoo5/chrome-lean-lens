@@ -185,6 +185,22 @@ function alive(pid) {
   }
 }
 
+/**
+ * Text from a run (what lake and Lean print, a codespace's messages) made safe to print in the
+ * terminal the helper runs in. A project's code writes that text, and the helper's own lines,
+ * the token among them, are printed there too. So control characters, which could move the
+ * cursor, rewrite earlier lines or change the terminal's settings, and the characters that
+ * reorder text, are shown as `\u…` escapes; and every line after the first is indented, so none
+ * passes for a line of the helper's own.
+ */
+export function printable(text) {
+  return String(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+      (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/\n/g, '\n    ');
+}
+
 // ---------------------------------------------------------------------------------------------
 // Running commands.
 
@@ -473,7 +489,8 @@ export function createHelper(options = {}) {
   // In the cache folder unless another place suits it better (a codespace's temporary disk).
   const buildsDir = path.resolve(options.buildsDir || cacheDir);
   const { config, save } = loadConfig(cacheDir);
-  const log = options.log || ((message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${message}`));
+  const print = options.log || ((message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${message}`));
+  const log = (message) => print(printable(message));
   const poolSize = Math.max(1, Number(options.jobs) || Math.min(4, Math.ceil(availableParallelism() / 2)));
   const subverso = options.subverso || DEFAULT_SUBVERSO;
   const subversoRev = options.subversoRev || DEFAULT_SUBVERSO_REV;
@@ -1278,7 +1295,7 @@ async function main() {
     let failed = helper.status(values.repo, values.sha).state === 'error';
     for (const file of paths) {
       const state = helper.fileState(values.repo, values.sha, file);
-      console.log(`${file}: ${state.state}${state.error ? ` (${state.error})` : ''}`);
+      console.log(`${file}: ${state.state}${state.error ? ` (${printable(state.error)})` : ''}`);
       if (state.state !== 'ready') failed = true;
     }
     if (failed) process.exitCode = 1;

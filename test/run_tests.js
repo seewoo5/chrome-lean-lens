@@ -1721,6 +1721,11 @@ console.log("22. Testing real Lean data (the local helper)...");
     assert(helper.isSha('1adf3d0cad950f5a9059596b4df342c38aae8353') && !helper.isSha('1adf3d0') && !helper.isSha('HEAD'));
     assert(helper.isLeanPath('A/B.lean') && helper.isLeanPath('Formal/DF_1/DF_1_2.lean'));
     for (const bad of ['../A.lean', '/abs/A.lean', 'A/../B.lean', 'A/B.txt', 'A\\B.lean', 'A//B.lean']) assert(!helper.isLeanPath(bad), `not a file path: ${bad}`);
+    // What a run prints reaches the helper's terminal only as plain text: no escape sequences,
+    // no characters that reorder a line, and no line that could pass for one of the helper's.
+    assert.strictEqual(helper.printable('error: \u001b[2J\u001b]0;x\u0007bad\r\nToken: abc\u202e'),
+      'error: \\u001b[2J\\u001b]0;x\\u0007bad\n    Token: abc\\u202e');
+    assert.strictEqual(helper.printable('ℝ → ∀ x, ⟨a, b⟩\tok'), 'ℝ → ∀ x, ⟨a, b⟩\tok');
     assert.strictEqual(helper.importsOf(['module', '', 'public import Mathlib.A', 'import all B.C -- note', '/- import Not.This -/', 'meta import D', '',
       '/-- doc: import Nope -/', 'theorem x : True := trivial', 'import Late'].join('\n')).join(' '), 'Mathlib.A B.C D');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-lens-test-'));
