@@ -798,6 +798,16 @@ const fakeFiles = {
   "RogersRamanujan/C.lean": "def c_def : ℕ := 0"
 };
 const realGetFileText = context.getFileText;
+// The parts of a file's URL come from the page: each stays one part, and none can lead elsewhere.
+assert.strictEqual(context.githubPath('o', 'r', 'main', 'A', 'B ?#%.lean'), 'o/r/main/A/B%20%3F%23%25.lean');
+assert.strictEqual(context.githubPath('..%2F', 'x/y'), '..%252F/x%2Fy');
+for (const bad of [['o', '..'], ['o', '.'], ['o', ''], ['o', null]]) assert.strictEqual(context.githubPath(...bad), null, `refused: ${bad}`);
+asyncChecks.push(Promise.all([
+  realGetFileText({ owner: 'o', repo: 'r', sha: '..', side: 'right', path: '../../settings/x.lean' }),
+  realGetFileText({ owner: 'o', repo: 'r', sha: 'abc', side: 'right', path: 'A/../../../settings.lean' }),
+  realGetFileText({ owner: '..', repo: 'r', sha: 'abc', side: 'right', path: 'A.lean' }),
+  context.getPrRevision('o', 'r', '1/../../x'),
+]).then(answers => assert.deepStrictEqual(answers, [null, null, null, null], 'a page cannot point the worker at other URLs')));
 const fetched = [];
 context.getFileText = async (ref) => { fetched.push(ref.path); return fakeFiles[ref.path] || null; };
 asyncChecks.push(context.projectDeclarations({ owner: "AxiomMath", repo: "RogersRamanujan", sha: "abc", paths: ["RogersRamanujan/A.lean"] }).then(ds => {
