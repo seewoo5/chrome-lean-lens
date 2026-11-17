@@ -158,6 +158,16 @@ export function toolchainOf(root) {
   return name;
 }
 
+/**
+ * The folder name of the SubVerso extractor for a Lean version. Each version gets its own: the
+ * name is readable, and ends with a hash of the version's exact name, since several names read
+ * the same once `/` and `:` are replaced (`a_b/c:d` and `a/b_c:d`), and two versions must not
+ * share an extractor built with only one of them.
+ */
+export function extractorDirName(toolchainName, subversoRev) {
+  return `${toolchainName.replace(/[^A-Za-z0-9._-]+/g, '_')}-${sha256(toolchainName).slice(0, 32)}-${subversoRev.slice(0, 12)}`;
+}
+
 export function formatBytes(bytes) {
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
   if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;
@@ -837,7 +847,7 @@ export function createHelper(options = {}) {
   /** The SubVerso extractor for a Lean version, built once and kept. */
   function ensureExtractor(root, toolchain, job, workDir) {
     const name = toolchainOf(root);
-    const dir = path.join(cacheDir, 'extractors', `${name.replace(/[^A-Za-z0-9._-]+/g, '_')}-${subversoRev.slice(0, 12)}`);
+    const dir = path.join(cacheDir, 'extractors', extractorDirName(name, subversoRev));
     const binary = path.join(dir, '.lake', 'build', 'bin', 'subverso-extract-mod');
     if (existsSync(binary)) return Promise.resolve({ binary, dir });
     if (!extractorBuilds.has(dir)) {

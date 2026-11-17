@@ -1863,6 +1863,10 @@ console.log("22. Testing real Lean data (the local helper)...");
       assert.throws(() => helper.toolchainOf(project), /no lean-toolchain file/);
       fs.writeFileSync(path.join(project, 'lean-toolchain'), 'leanprover/lean4:v4.35.0\n');
       assert.strictEqual(helper.toolchainOf(project), 'leanprover/lean4:v4.35.0');
+      // Each Lean version has an extractor of its own, also versions whose names read alike.
+      const rev = '892d6dc520270b5fb8c1291dd1b131e8c16255ed';
+      assert(/^leanprover_lean4_v4\.35\.0-[0-9a-f]{32}-892d6dc52027$/.test(helper.extractorDirName('leanprover/lean4:v4.35.0', rev)));
+      assert.notStrictEqual(helper.extractorDirName('a_b/c:d', rev), helper.extractorDirName('a/b_c:d', rev));
       fs.writeFileSync(path.join(project, 'lean-toolchain'), 'v4; curl example.com\n');
       assert.throws(() => helper.toolchainOf(project), /does not name a Lean version/);
       fs.rmSync(path.join(project, 'lean-toolchain'));
