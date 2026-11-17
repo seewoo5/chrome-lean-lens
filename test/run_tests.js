@@ -201,8 +201,16 @@ const mockLoogleHits = [
 // A working in-memory chrome.storage and a captured message listener (exercised in section 17).
 const fakeStorage = {};
 const workerListeners = [];
+const storageAccessLevels = [];
+// Who sends a message: the extension's own options page, or the content script in a GitHub tab.
+const EXTENSION_PAGE = { id: 'lean-lens-test', url: 'chrome-extension://lean-lens-test/options/options.html' };
+const GITHUB_TAB = { id: 'lean-lens-test', url: 'https://github.com/o/r/pull/7/files', tab: { id: 1 } };
 context.chrome = {
-  runtime: { onMessage: { addListener: (fn) => workerListeners.push(fn) } },
+  runtime: {
+    id: 'lean-lens-test',
+    getURL: (file) => `chrome-extension://lean-lens-test/${file}`,
+    onMessage: { addListener: (fn) => workerListeners.push(fn) }
+  },
   storage: { local: {
     get: (keys, cb) => {
       const out = {};
@@ -212,7 +220,8 @@ context.chrome = {
     },
     set: (obj, cb) => { Object.assign(fakeStorage, obj); if (cb) cb(); },
     remove: (keys, cb) => { [].concat(keys).forEach(k => delete fakeStorage[k]); if (cb) cb(); },
-    clear: (cb) => { Object.keys(fakeStorage).forEach(k => delete fakeStorage[k]); if (cb) cb(); }
+    clear: (cb) => { Object.keys(fakeStorage).forEach(k => delete fakeStorage[k]); if (cb) cb(); },
+    setAccessLevel: (options) => { storageAccessLevels.push(options.accessLevel); return Promise.resolve(); }
   } }
 };
 loadScript('background/service_worker.js');
@@ -832,7 +841,6 @@ const sampleRequests = {
   TEST_HELPER: { url: 'http://127.0.0.1:9', token: 'x' },
   EXACT_HOVER: { fileRef: null },
   HELPER_RUN: { owner: 'o', repo: 'r', paths: ['A.lean'] },
-  HELPER_ALLOW: { repo: 'o/r' },
   FILE_VARIABLE: { name: 'hT', fileRef: null },
   FILE_INSTANCES: { fileRef: null },
   NOTATION_DOC: { name: '«term_+_»' },
@@ -850,7 +858,7 @@ const handlerRuns = handled.map(action => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error(`${action}: no response`)), 10000);
   let keptOpen;
   try {
-    keptOpen = workerListeners[0](Object.assign({ action }, sampleRequests[action] || {}), {}, (res) => { clearTimeout(timer); resolve(res); });
+    keptOpen = workerListeners[0](Object.assign({ action }, sampleRequests[action] || {}), EXTENSION_PAGE, (res) => { clearTimeout(timer); resolve(res); });
   } catch (err) {
     clearTimeout(timer);
     reject(new Error(`${action} threw: ${err.message}`));
@@ -863,6 +871,16 @@ asyncChecks.push(Promise.all(handlerRuns).then(() => {
   assert.deepStrictEqual(handlerFailures, [], `message handlers failed:\n${handlerFailures.join('\n')}`);
 }, (err) => { console.warn = realWarn; throw err; }));
 assert.strictEqual(workerListeners[0]({ action: 'NO_SUCH_ACTION' }, {}, () => {}), false, "unknown actions are ignored");
+assert.deepStrictEqual(storageAccessLevels, ['TRUSTED_CONTEXTS'], 'content scripts cannot read the stored settings themselves');
+// What a GitHub page may not do: change the settings, clear the cache, have the worker reach an
+// address it names, or read the helper's token.
+for (const action of ['SET_SETTINGS', 'CLEAR_CACHE', 'TEST_HELPER']) {
+  for (const sender of [GITHUB_TAB, {}, { id: 'other-extension', url: 'chrome-extension://other-extension/x.html' }]) {
+    let answer = null;
+    const kept = workerListeners[0](Object.assign({ action }, sampleRequests[action]), sender, (res) => { answer = res; });
+    assert(kept === false && answer && answer.success === false && /extension's own pages/.test(answer.error), `${action} is refused from ${sender.url || 'an unknown sender'}`);
+  }
+}
 
 // 18. Hovering a gap shows the term there with its type, as Lean's infoview does (`a b : Y`).
 //     Expected outputs were checked against Lean's own hovers (lean-lsp) on the same code.
@@ -2216,7 +2234,7 @@ console.log("22. Testing real Lean data (the local helper)...");
     }
 
     // --- The worker: asks the helper, keeps a file's data once Lean has run.
-    const send = (message) => new Promise((resolve) => workerListeners[0](message, {}, resolve));
+    const send = (message, sender = EXTENSION_PAGE) => new Promise((resolve) => workerListeners[0](message, sender, resolve));
     const calls = [];
     let fileAnswer = { state: 'missing' };
     context.URL = URL;
@@ -2264,6 +2282,13 @@ console.log("22. Testing real Lean data (the local helper)...");
       assert.strictEqual(res.state, 'error', 'data in another format is not used');
       assert.strictEqual((await send({ action: 'TEST_HELPER', url: 'http://127.0.0.1:5326', token: 'tok' })).success, true);
       assert.strictEqual((await send({ action: 'TEST_HELPER', url: 'http://127.0.0.1:5326', token: 'bad' })).state, 'unauthorized');
+      // The token goes only to a helper on this machine, and only the extension's pages see it.
+      for (const url of ['https://evil.example:5326', 'http://127.0.0.1.evil.example:5326', 'http://192.168.1.2:5326', 'file:///x']) {
+        assert.strictEqual((await send({ action: 'TEST_HELPER', url, token: 'tok' })).state, 'not_local', url);
+      }
+      assert.strictEqual((await send({ action: 'GET_SETTINGS' })).settings.helperToken, 'tok', 'the options page sees the token');
+      const inPage = (await send({ action: 'GET_SETTINGS' }, GITHUB_TAB)).settings;
+      assert(inPage.enableHelper && !('helperToken' in inPage), 'a GitHub page gets the settings without the token');
       // Switched off: the helper is not contacted.
       await settingsWith({ enableHelper: false });
       const quiet = calls.length;

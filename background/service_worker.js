@@ -1299,13 +1299,26 @@ async function handleLookupToken(token, subToken, fileRef, contextText, tacticPo
 // The local helper: real Lean, run on this machine (helper/lean-lens-helper.mjs).
 
 /**
+ * The helper's address, when it is one on this machine (the hosts the manifest grants), or null.
+ * The helper only ever listens there, and the token goes with every request: an address
+ * elsewhere would send it to whoever is there.
+ */
+function localHelperUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch (err) { return null; }
+  return parsed.protocol === 'http:' && (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') ? parsed : null;
+}
+
+/**
  * One request to the helper. Resolves to its JSON answer, or to `{state}` when there is none:
- * 'off' (not set up), 'offline' (not running), 'unauthorized' (wrong token), 'not_allowed'
- * (the repository is not allowed yet), 'error'.
+ * 'off' (not set up), 'not_local' (its address is not on this machine), 'offline' (not
+ * running), 'unauthorized' (wrong token), 'not_allowed' (the repository is not allowed yet),
+ * 'error'.
  */
 async function helperRequest(path, { body, settings, timeout = 6000 } = {}) {
   const s = settings || await getSettings();
   if (!s.enableHelper || !s.helperUrl || !s.helperToken) return { state: 'off' };
+  if (!localHelperUrl(s.helperUrl)) return { state: 'not_local' };
   let timer = null;
   try {
     const controller = new AbortController();
@@ -1520,7 +1533,13 @@ const MESSAGE_HANDLERS = {
     const f = await structureField(request.type, request.index, request.rest);
     return f ? { field: { name: f.name, type: f.type }, structure: f.structure } : null;
   },
-  GET_SETTINGS: async () => ({ success: true, settings: await getSettings(), stats: queryStats }),
+  // The settings. Pages on GitHub get them without the helper's token, which only the worker
+  // itself needs.
+  GET_SETTINGS: async (request, sender) => {
+    const settings = await getSettings();
+    if (!fromExtensionPage(sender)) delete settings.helperToken;
+    return { success: true, settings, stats: queryStats };
+  },
   SET_SETTINGS: (request) => new Promise((resolve) => {
     chrome.storage.local.set({ [SETTINGS_KEY]: request.settings }, () => resolve({ success: true }));
   }),
@@ -1550,11 +1569,6 @@ const MESSAGE_HANDLERS = {
   DECL_WHERE: (request) => declWhere(request.fileRef),
   // The proof a hovered tactic is in, step by step, for stepping through it in the tooltip.
   EXACT_STEPS: (request) => exactSteps(request),
-  HELPER_ALLOW: async (request) => {
-    const res = await helperRequest('/allow', { body: { repo: request.repo } });
-    exactCache.clear();
-    return res;
-  },
   TEST_HELPER: async (request) => {
     const res = await helperRequest('/status', { settings: { enableHelper: true, helperUrl: request.url, helperToken: request.token }, timeout: 2500 });
     return { success: Boolean(res && res.ok), state: res && res.state, details: res };
@@ -1564,11 +1578,38 @@ const MESSAGE_HANDLERS = {
 // What the page gets when a handler fails, so it never waits forever.
 const MESSAGE_FALLBACKS = { LOOKUP_TOKEN: { success: false, data: null }, PROJECT_DECLARATIONS: { declarations: [] } };
 
+// Content scripts never read storage themselves, and with the settings there (the helper's
+// token among them) they should not be able to: only the extension's own pages and this worker
+// may. (Chrome 102 and later; where a browser has no such setting, the messages below are the
+// only guard.)
+try {
+  const local = chrome.storage && chrome.storage.local;
+  if (local && typeof local.setAccessLevel === 'function') {
+    Promise.resolve(local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })).catch(() => {});
+  }
+} catch (err) { /* not supported here */ }
+
+// Messages only the extension's own pages (the options page and the popup) send. Content
+// scripts run inside GitHub's pages; should one of those ever be taken over, it must not be
+// able to change the settings (and so send the helper's token elsewhere), or make the worker
+// reach an address of its choosing.
+const EXTENSION_PAGE_ONLY = new Set(['SET_SETTINGS', 'CLEAR_CACHE', 'TEST_HELPER']);
+
+/** Whether a message comes from one of the extension's own pages, not from a content script. */
+function fromExtensionPage(sender) {
+  return Boolean(sender && sender.id === chrome.runtime.id && typeof sender.url === 'string' &&
+    sender.url.startsWith(chrome.runtime.getURL('')));
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const handler = request && Object.prototype.hasOwnProperty.call(MESSAGE_HANDLERS, request.action) && MESSAGE_HANDLERS[request.action];
   if (!handler) return false;
+  if (EXTENSION_PAGE_ONLY.has(request.action) && !fromExtensionPage(sender)) {
+    sendResponse({ success: false, error: 'Only the extension\'s own pages may send this' });
+    return false;
+  }
   Promise.resolve()
-    .then(() => handler(request)) // also catches errors thrown synchronously
+    .then(() => handler(request, sender)) // also catches errors thrown synchronously
     .then(sendResponse, (err) => {
       console.warn('[Lean Lens] message handler failed:', request.action, err);
       sendResponse(Object.prototype.hasOwnProperty.call(MESSAGE_FALLBACKS, request.action) ? MESSAGE_FALLBACKS[request.action] : null);

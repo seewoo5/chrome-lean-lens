@@ -117,6 +117,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (res && res.state === 'unauthorized') {
           helperTestResult.textContent = '✗ The helper is running but rejected this token.';
           helperTestResult.style.color = '#f85149';
+        } else if (res && res.state === 'not_local') {
+          helperTestResult.textContent = '✗ The helper runs on this machine: its address starts with http://127.0.0.1 or http://localhost.';
+          helperTestResult.style.color = '#f85149';
         } else {
           helperTestResult.textContent = '✗ Could not reach the helper. Start it with: node helper/lean-lens-helper.mjs';
           helperTestResult.style.color = '#f85149';
