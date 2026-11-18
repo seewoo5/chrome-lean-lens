@@ -50,8 +50,10 @@ const MATHLIB_ROOM_BYTES = 12e9;
 // ---------------------------------------------------------------------------------------------
 // Checks on what a request names. Everything here ends up in a path or a command's arguments.
 
+// A name may start with a dot (`owner/.github`), but may not be just one: `owner/.` would make
+// the copy's folder the owner's folder, which holds the copies of all the owner's repositories.
 export const isRepo = (value) => typeof value === 'string' && value.length < 200 &&
-  /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*$/.test(value) && !value.includes('..');
+  /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*$/.test(value) && !value.includes('..') && !value.endsWith('/.');
 export const isSha = (value) => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
 export const isLeanPath = (value) => typeof value === 'string' && value.length < 512 && value.endsWith('.lean') &&
   !value.includes('\\') && !value.includes('\0') && value.split('/').every((part) => part && part !== '.' && part !== '..');

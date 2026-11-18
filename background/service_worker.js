@@ -653,10 +653,25 @@ async function fetchText(url, ms = 5000, init = {}) {
   }
 }
 
+/**
+ * The path of a GitHub URL made from parts a page names (owner, repository, commit, the file's
+ * path), or null when a part would not stay one part. Each is encoded, so a `/`, `?` or `#`
+ * in it stays inside it; and none may be empty, `.` or `..`, which the URL would resolve, so
+ * that `/owner/repo/blob/..%2F..%2Fsettings/x.lean` cannot make the worker fetch some other
+ * page of github.com with the user's session.
+ */
+function githubPath(...parts) {
+  const segments = parts.map(part => String(part == null ? '' : part));
+  if (segments.some(s => s === '' || s === '.' || s === '..')) return null;
+  return segments.map(encodeURIComponent).join('/');
+}
+
 function getPrRevision(owner, repo, pr) {
   const key = `${owner}/${repo}#${pr}`;
+  const at = /^\d+$/.test(String(pr)) ? githubPath(owner, repo) : null;
+  if (!at) return Promise.resolve(null);
   if (!prRevisionCache.has(key)) {
-    prRevisionCache.set(key, fetchText(`https://api.github.com/repos/${owner}/${repo}/pulls/${pr}`).then(t => {
+    prRevisionCache.set(key, fetchText(`https://api.github.com/repos/${at}/pulls/${pr}`).then(t => {
       if (!t) return null;
       const j = JSON.parse(t);
       return { head: j.head && j.head.sha, base: j.base && j.base.sha };
@@ -672,13 +687,15 @@ async function getFileText(fileRef) {
     sha = rev && (fileRef.side === 'left' ? rev.base : rev.head);
   }
   if (!sha || !fileRef.path) return null;
+  const repoPath = githubPath(fileRef.owner, fileRef.repo);
+  const filePath = githubPath(sha, ...String(fileRef.path).split('/'));
+  if (!repoPath || !filePath) return null;
   const key = `${fileRef.owner}/${fileRef.repo}@${sha}:${fileRef.path}`;
   if (!fileTextCache.has(key)) {
     if (fileTextCache.size > 300) fileTextCache.delete(fileTextCache.keys().next().value);
-    const path = fileRef.path.split('/').map(encodeURIComponent).join('/');
-    fileTextCache.set(key, fetchText(`https://raw.githubusercontent.com/${fileRef.owner}/${fileRef.repo}/${sha}/${path}`)
+    fileTextCache.set(key, fetchText(`https://raw.githubusercontent.com/${repoPath}/${filePath}`)
       // Private repositories: github.com's raw endpoint with the user's GitHub session.
-      .then(t => t !== null ? t : fetchText(`https://github.com/${fileRef.owner}/${fileRef.repo}/raw/${sha}/${path}`, 8000, { credentials: 'include' })));
+      .then(t => t !== null ? t : fetchText(`https://github.com/${repoPath}/raw/${filePath}`, 8000, { credentials: 'include' })));
   }
   return fileTextCache.get(key);
 }
