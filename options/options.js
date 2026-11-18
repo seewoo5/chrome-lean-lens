@@ -62,9 +62,15 @@ document.addEventListener('DOMContentLoaded', () => {
       helperToken: helperToken.value.trim()
     };
 
-    chrome.runtime.sendMessage({ action: "SET_SETTINGS", settings: currentSettings }, () => {
+    chrome.runtime.sendMessage({ action: "SET_SETTINGS", settings: currentSettings }, (res) => {
       saveStatus.classList.add('visible');
       setTimeout(() => saveStatus.classList.remove('visible'), 1500);
+      // The helper's address and token are kept where no web page can reach them. Where the
+      // browser gives the extension no such place that lasts, they are not saved for good.
+      if (res && res.helperKept && res.helperKept !== 'saved' && currentSettings.enableHelper) {
+        helperTestResult.textContent = 'This browser gives the extension no private storage that lasts, so the helper\'s address and token are kept only until the browser closes: paste them again after that.';
+        helperTestResult.style.color = '';
+      }
 
       // Notify all tabs
       chrome.tabs.query({}, (tabs) => {

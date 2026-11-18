@@ -32,20 +32,134 @@ const DEFAULT_SETTINGS = {
 const memoryCache = new Map();
 let queryStats = { totalQueries: 0, cacheHits: 0, loogleHits: 0, leanHits: 0 };
 
+// ---------------------------------------------------------------------------------------------
+// Where the settings are kept.
+//
+// The settings about the helper (whether it is used, its address, its token) decide where the
+// token goes and whether Lean runs, so no web page's content script may read or change them.
+// `chrome.storage.local` does not promise that: content scripts may use it unless the browser
+// can be told otherwise (`setAccessLevel`, below), which Firefox cannot. So those three are kept
+// in the extension's own IndexedDB instead. That belongs to the extension's origin, which only
+// this worker and the extension's pages have: a content script's `indexedDB` is the web page's.
+// Only this worker uses it; the options page and the popup ask the worker. The other settings
+// (delays, what is shown) stay in `chrome.storage.local`.
+
+const HELPER_SETTINGS = ['enableHelper', 'helperUrl', 'helperToken'];
+const PRIVATE_DB = 'lean_lens_private';
+const PRIVATE_STORE = 'values';
+const HELPER_SETTINGS_KEY = 'helper_settings';
+
+/** One operation on the private store (`act` gets the store and returns a request). */
+function privateStore(mode, act) {
+  return new Promise((resolve, reject) => {
+    const opening = indexedDB.open(PRIVATE_DB, 1);
+    opening.onupgradeneeded = () => opening.result.createObjectStore(PRIVATE_STORE);
+    opening.onerror = () => reject(opening.error);
+    opening.onsuccess = () => {
+      const db = opening.result;
+      try {
+        const transaction = db.transaction(PRIVATE_STORE, mode);
+        const request = act(transaction.objectStore(PRIVATE_STORE));
+        transaction.oncomplete = () => { db.close(); resolve(request.result); };
+        transaction.onabort = () => { db.close(); reject(transaction.error); };
+      } catch (err) {
+        db.close();
+        reject(err);
+      }
+    };
+  });
+}
+
+// Where the helper's settings go when the browser has no IndexedDB for the extension (some
+// private modes): `chrome.storage.session`, which content scripts cannot use and which lasts
+// until the browser closes; without that, this worker's memory. Never `chrome.storage.local`.
+const sessionArea = () => {
+  try { return (chrome.storage && chrome.storage.session) || null; } catch (err) { return null; }
+};
+const inArea = (area, method, argument) => new Promise((resolve, reject) => {
+  try {
+    area[method](argument, (result) => (chrome.runtime.lastError ? reject(new Error(chrome.runtime.lastError.message)) : resolve(result)));
+  } catch (err) { reject(err); }
+});
+
+let helperSettings; // as last read or written: `{ values, kept }`, `values` null when none are saved
+
+/** The helper's settings as saved, or null: read once, then remembered while the worker lives. */
+async function readHelperSettings() {
+  if (helperSettings) return helperSettings.values;
+  let values = null;
+  let kept = 'saved';
+  try {
+    values = (await privateStore('readonly', (store) => store.get(HELPER_SETTINGS_KEY))) || null;
+  } catch (err) {
+    kept = 'session';
+    try { values = (await inArea(sessionArea(), 'get', [HELPER_SETTINGS_KEY]))[HELPER_SETTINGS_KEY] || null; } catch (err2) { kept = 'memory'; }
+  }
+  if (!helperSettings) helperSettings = { values, kept };
+  return helperSettings.values;
+}
+
+/**
+ * Saves the helper's settings. Resolves to how long they are kept: 'saved' (for good),
+ * 'session' (until the browser closes) or 'memory' (until this worker stops).
+ */
+async function writeHelperSettings(values) {
+  let kept = 'saved';
+  try {
+    await privateStore('readwrite', (store) => store.put(values, HELPER_SETTINGS_KEY));
+  } catch (err) {
+    kept = 'session';
+    try { await inArea(sessionArea(), 'set', { [HELPER_SETTINGS_KEY]: values }); } catch (err2) { kept = 'memory'; }
+  }
+  helperSettings = { values, kept };
+  return kept;
+}
+
+const pick = (from, keys) => Object.fromEntries(keys.filter((key) => from && Object.prototype.hasOwnProperty.call(from, key)).map((key) => [key, from[key]]));
+const without = (from, keys) => Object.fromEntries(Object.entries(from || {}).filter(([key]) => !keys.includes(key)));
+
+// One read or write of the settings at a time: a read may have to move the helper's settings
+// (below), and must not put back old ones over what is being saved.
+let settingsTurn = Promise.resolve();
+const inTurn = (work) => {
+  const result = settingsTurn.then(work);
+  settingsTurn = result.catch(() => {});
+  return result;
+};
+
 /**
  * Get stored settings merged with defaults.
  */
-async function getSettings() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([SETTINGS_KEY, LEGACY_SETTINGS_KEY], (res) => {
-      let saved = res[SETTINGS_KEY];
-      // One-time migration from the extension's former name ("Verso").
-      if (!saved && res[LEGACY_SETTINGS_KEY]) {
-        saved = res[LEGACY_SETTINGS_KEY];
-        chrome.storage.local.set({ [SETTINGS_KEY]: saved }, () => chrome.storage.local.remove(LEGACY_SETTINGS_KEY));
-      }
-      resolve(Object.assign({}, DEFAULT_SETTINGS, saved || {}));
-    });
+function getSettings() {
+  return inTurn(async () => {
+    const stored = await inArea(chrome.storage.local, 'get', [SETTINGS_KEY, LEGACY_SETTINGS_KEY]).catch(() => ({}));
+    let saved = stored[SETTINGS_KEY];
+    // One-time migration from the extension's former name ("Verso").
+    const legacy = !saved && stored[LEGACY_SETTINGS_KEY];
+    if (legacy) saved = legacy;
+    let helper = await readHelperSettings();
+    // Settings saved by a version that kept the helper's with the others: those are moved to
+    // the private store and removed from here. Once the private store has some, any found here
+    // are not ours (a page's script may have written them) and are only removed.
+    const stray = pick(saved, HELPER_SETTINGS);
+    if (Object.keys(stray).length) {
+      if (!helper) { await writeHelperSettings(stray); helper = stray; }
+      saved = without(saved, HELPER_SETTINGS);
+    }
+    if (legacy || Object.keys(stray).length) {
+      await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: saved }).catch(() => {});
+      if (legacy) await inArea(chrome.storage.local, 'remove', LEGACY_SETTINGS_KEY).catch(() => {});
+    }
+    return Object.assign({}, DEFAULT_SETTINGS, saved || {}, pick(helper, HELPER_SETTINGS));
+  });
+}
+
+/** Save the settings: the helper's privately, the others in `chrome.storage.local`. */
+function setSettings(settings) {
+  return inTurn(async () => {
+    const kept = await writeHelperSettings(pick(settings, HELPER_SETTINGS));
+    await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: without(settings, HELPER_SETTINGS) }).catch(() => {});
+    return kept;
   });
 }
 
@@ -1543,9 +1657,9 @@ const MESSAGE_HANDLERS = {
     if (!fromExtensionPage(sender)) delete settings.helperToken;
     return { success: true, settings, stats: queryStats };
   },
-  SET_SETTINGS: (request) => new Promise((resolve) => {
-    chrome.storage.local.set({ [SETTINGS_KEY]: request.settings }, () => resolve({ success: true }));
-  }),
+  // `helperKept` says how long the helper's settings last: 'saved', or 'session' or 'memory'
+  // where the browser gives the extension no lasting private place (see `writeHelperSettings`).
+  SET_SETTINGS: async (request) => ({ success: true, helperKept: await setSettings(request.settings || {}) }),
   CLEAR_CACHE: () => new Promise((resolve) => {
     memoryCache.clear();
     rawQueryCache.clear();
@@ -1581,10 +1695,10 @@ const MESSAGE_HANDLERS = {
 // What the page gets when a handler fails, so it never waits forever.
 const MESSAGE_FALLBACKS = { LOOKUP_TOKEN: { success: false, data: null }, PROJECT_DECLARATIONS: { declarations: [] } };
 
-// Content scripts never read storage themselves, and with the settings there (the helper's
-// token among them) they should not be able to: only the extension's own pages and this worker
-// may. (Chrome 102 and later; where a browser has no such setting, the messages below are the
-// only guard.)
+// Content scripts never read storage themselves, and should not be able to: only the extension's
+// own pages and this worker may. Not every browser can be told so (Firefox cannot), which is why
+// the helper's settings are not kept there at all (see `HELPER_SETTINGS`); where it can, this
+// also keeps pages from the other settings and the cached lookups.
 try {
   const local = chrome.storage && chrome.storage.local;
   if (local && typeof local.setAccessLevel === 'function') {
