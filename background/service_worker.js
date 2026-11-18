@@ -73,6 +73,8 @@ function privateStore(mode, act) {
 // Where the helper's settings go when the browser has no IndexedDB for the extension (some
 // private modes): `chrome.storage.session`, which content scripts cannot use and which lasts
 // until the browser closes; without that, this worker's memory. Never `chrome.storage.local`.
+// This should be rare, and its cost is only that the token is pasted again after a restart
+// (the options page says so): a lesser evil than keeping it where a page's script can read it.
 const sessionArea = () => {
   try { return (chrome.storage && chrome.storage.session) || null; } catch (err) { return null; }
 };
