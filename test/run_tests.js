@@ -2090,7 +2090,7 @@ console.log("22. Testing real Lean data (the local helper)...");
           const sample = fs.readFileSync(path.join(__dirname, 'fixtures', 'Sample.lean'), 'utf8');
           const lakefile = 'name = "p"\n';
           const shaS = projectAt('s', { 'lean-toolchain': 'lean-a\n', 'next-lean': 'lean-b\n', 'lakefile.toml': lakefile, 'Sample.lean': sample });
-          const shaT = projectAt('t', { 'lean-toolchain': 'lean-b\n', 'lakefile.toml': lakefile, 'Sample.lean': sample, 'Again.lean': sample });
+          const shaT = projectAt('t', { 'lean-toolchain': 'lean-b\n', 'lakefile.toml': lakefile, 'Sample.lean': sample, 'Again.lean': sample, 'More.lean': sample });
           const cache5 = path.join(root, 'cache5');
           const kept = path.join(cache5, 'extractors');
           // An extractor kept by an earlier version of the helper, under the name alone.
@@ -2126,11 +2126,16 @@ console.log("22. Testing real Lean data (the local helper)...");
             assert.strictEqual(stamp.toolchain, fs.realpathSync(path.join(toolchains, 'lean-b')));
             // The same name is another Lean once its programs changed (`stable` after a release, a
             // local build made again): it gets a new extractor. Unchanged, it uses the one it has.
-            assert.strictEqual(said.filter((line) => /Building the SubVerso extractor/.test(line)).length, 2);
+            const builds = () => said.filter((line) => /Building the SubVerso extractor/.test(line)).length;
+            assert.strictEqual(builds(), 2);
+            assert.strictEqual((await elaborate('o/t', shaT, 'More.lean')).lean, 'lean-b');
+            assert.strictEqual(builds(), 2, 'an unchanged Lean uses the extractor it has');
+            assert.deepStrictEqual(builtBy(), ['lean-a by lean-a', 'lean-b by lean-b']);
+            assert.strictEqual(read('used'), 'lean-a lean-b lean-b');
             script(path.join(toolchains, 'lean-b', 'bin', 'lake'), [...lakeLines, '# a later release']);
             assert.strictEqual((await elaborate('o/t', shaT, 'Again.lean')).lean, 'lean-b');
             assert.deepStrictEqual(builtBy(), ['lean-a by lean-a', 'lean-b by lean-b', 'lean-b by lean-b']);
-            assert.strictEqual(said.filter((line) => /Building the SubVerso extractor/.test(line)).length, 3);
+            assert.strictEqual(builds(), 3);
           } finally {
             process.env.PATH = pathBefore;
             h5.shutdown();
