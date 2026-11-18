@@ -1171,7 +1171,7 @@ const USAGE = `Lean Lens helper: real Lean hovers and proof states for the exten
   node lean-lens-helper.mjs clean [--all]              remove what the helper keeps on disk
                                                        (--all: the results of earlier runs too)
   node lean-lens-helper.mjs codespaces [--stop | --delete]
-                                                       list, stop or delete the codespaces it made
+                                                       list, stop or delete the codespaces its settings name
 
 Options
   --port N                  port on 127.0.0.1 (default ${DEFAULT_PORT})
@@ -1225,16 +1225,19 @@ async function codespacesCommand(values) {
   const { config, save } = loadConfig(cacheDir);
   const spaces = createCodespaces({ config, save, run, log: console.log, gh: values.gh, recordsDir: path.join(cacheDir, 'codespaces') });
   const ours = await spaces.ours();
-  if (!ours.length) console.log('There are no Lean Lens codespaces.');
+  if (!ours.length) console.log("There are no codespaces that this helper's settings name.");
   for (const space of ours) {
-    if (values.delete) {
+    if (space.busy && (values.delete || values.stop)) {
+      // (Made for a run without a sandbox by a helper that is still running: it deletes it itself.)
+      console.log(`Left alone: ${space.name} (${space.repository}) is in use by a running helper (process ${space.busy})`);
+    } else if (values.delete) {
       await spaces.remove(space.name);
       console.log(`Deleted ${space.name} (${space.repository})`);
     } else if (values.stop && space.state !== 'Shutdown') {
       await spaces.stop(space.name);
       console.log(`Stopped ${space.name} (${space.repository})`);
     } else {
-      console.log(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}`);
+      console.log(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}${space.busy ? `  (in use by a running helper, process ${space.busy})` : ''}`);
     }
   }
 }
@@ -1327,7 +1330,8 @@ async function main() {
   });
   stop = () => {
     console.log(`\nStopping.${helper.remote
-      ? (helper.keepCodespaces ? '' : ' Stopping the codespaces that were used; the results stay here.')
+      ? (values['no-sandbox'] ? ' Deleting the codespace of a run under way, if there is one; the results stay here.'
+        : helper.keepCodespaces ? '' : ' Stopping the codespaces that were used; the results stay here.')
       : (helper.keepBuilds ? '' : ' Removing the builds; the results stay.')}`);
     server.close();
     helper.shutdown();
@@ -1344,7 +1348,9 @@ ${sandboxLine}.
 Allowed repositories: ${helper.config.allow.length ? helper.config.allow.join(', ') : 'none yet (allow one from the extension, or with --allow owner/repo)'}
 Kept in: ${helper.cacheDir} (${formatBytes(await sizeOf(helper.cacheDir))} now)${helper.buildsDir === helper.cacheDir ? '' : `\nBuilds go to: ${helper.buildsDir}`}
 ${helper.remote
-    ? `Codespaces: ${helper.keepCodespaces
+    ? `Codespaces: ${values['no-sandbox']
+      ? 'each run gets a new one, deleted when the run is over and when the helper stops (--no-sandbox). The results are kept here.'
+      : helper.keepCodespaces
       ? 'left running (--keep-codespaces); GitHub stops an idle one by itself.'
       : `one is stopped ${helper.tidyMinutes ? `after ${minutes} without a run` : 'when its run is over'}, and when the helper stops. The results are kept here.`}`
     : `Builds: ${helper.keepBuilds
