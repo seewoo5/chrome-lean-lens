@@ -1849,8 +1849,8 @@ console.log("22. Testing real Lean data (the local helper)...");
         assert(ran.stdout.includes('\nB.lean: error ('), ran.stdout);
         assert(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202e]/.test(ran.stdout + ran.stderr), `no control character reaches the terminal: ${JSON.stringify(ran.stdout + ran.stderr)}`);
         // What makes the command give up is printed the same way (here, its own refusal).
-        const refused = spawnSync(process.execPath, [helperFile, '--cache', path.join(root, 'cache-run'), '--link', 'o/r\u001b[2J'], { encoding: 'utf8', timeout: 60000 });
-        assert(refused.status === 1 && refused.stderr.includes('not o/r\\u001b[2J'), JSON.stringify(refused.stderr));
+        const refused = spawnSync(process.execPath, [helperFile, '--cache', path.join(root, 'cache-run'), '--here', 'o/r\u001b[2J'], { encoding: 'utf8', timeout: 60000 });
+        assert(refused.status === 1 && refused.stderr.includes('--here takes owner/repo, not o/r\\u001b[2J'), JSON.stringify(refused.stderr));
         const taken = require('net').createServer();
         await new Promise((resolve) => taken.listen(0, '127.0.0.1', resolve));
         const byOther = spawnSync(process.execPath, [helperFile, '--port', String(taken.address().port), '--cache', path.join(root, 'cache-port')], { encoding: 'utf8' });
