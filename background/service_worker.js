@@ -1325,6 +1325,9 @@ async function helperRequest(path, { body, settings, timeout = 6000 } = {}) {
     timer = setTimeout(() => controller.abort(), timeout);
     const res = await fetch(new URL(path, s.helperUrl).toString(), {
       method: body ? 'POST' : 'GET',
+      // The token goes to the address checked above and no further: the helper never redirects,
+      // and whatever else answers there must not send the request, token and all, elsewhere.
+      redirect: 'error',
       headers: Object.assign({ 'X-Lean-Lens-Token': s.helperToken }, body ? { 'Content-Type': 'application/json' } : {}),
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal

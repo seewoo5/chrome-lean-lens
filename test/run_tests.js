@@ -2236,6 +2236,7 @@ console.log("22. Testing real Lean data (the local helper)...");
     // --- The worker: asks the helper, keeps a file's data once Lean has run.
     const send = (message, sender = EXTENSION_PAGE) => new Promise((resolve) => workerListeners[0](message, sender, resolve));
     const calls = [];
+    const redirectable = []; // requests to the helper that would follow a redirect
     let fileAnswer = { state: 'missing' };
     context.URL = URL;
     context.AbortController = AbortController;
@@ -2244,6 +2245,7 @@ console.log("22. Testing real Lean data (the local helper)...");
       if (u.host !== '127.0.0.1:5326') return { ok: false, status: 404, json: async () => null, text: async () => '' };
       const body = init.body ? JSON.parse(init.body) : null;
       calls.push({ path: u.pathname, body });
+      if (init.redirect !== 'error') redirectable.push(u.pathname);
       if ((init.headers || {})['X-Lean-Lens-Token'] !== 'tok') return { ok: false, status: 401, json: async () => ({ error: 'no' }) };
       const answers = {
         '/file': body && body.path === 'Old.lean' ? { state: 'ready', data: { version: 1 } } : fileAnswer,
@@ -2289,6 +2291,14 @@ console.log("22. Testing real Lean data (the local helper)...");
       assert.strictEqual((await send({ action: 'GET_SETTINGS' })).settings.helperToken, 'tok', 'the options page sees the token');
       const inPage = (await send({ action: 'GET_SETTINGS' }, GITHUB_TAB)).settings;
       assert(inPage.enableHelper && !('helperToken' in inPage), 'a GitHub page gets the settings without the token');
+      // A redirect from the helper's address is an error, not somewhere else to send the token:
+      // the request fails as the browser makes it fail.
+      const fetchBefore = context.fetch;
+      context.fetch = async (url, init) => { if (init.redirect === 'error') throw new TypeError('Failed to fetch'); return fetchBefore('http://127.0.0.1:5326/status', init); };
+      assert.strictEqual((await send({ action: 'TEST_HELPER', url: 'http://127.0.0.1:5326', token: 'tok' })).state, 'offline');
+      context.fetch = fetchBefore;
+      assert(calls.length > 5);
+      assert.deepStrictEqual(redirectable, [], 'no request that carries the token follows a redirect');
       // Switched off: the helper is not contacted.
       await settingsWith({ enableHelper: false });
       const quiet = calls.length;
