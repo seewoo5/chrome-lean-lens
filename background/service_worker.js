@@ -49,22 +49,32 @@ const PRIVATE_DB = 'lean_lens_private';
 const PRIVATE_STORE = 'values';
 const HELPER_SETTINGS_KEY = 'helper_settings';
 
+// How long an operation on the private store may take. Every read of the settings waits for
+// one, so a database that never answers (it can stay blocked, or its storage be stuck) is given
+// up on, as one that fails is.
+const PRIVATE_STORE_TIMEOUT_MS = 3000;
+
 /** One operation on the private store (`act` gets the store and returns a request). */
 function privateStore(mode, act) {
   return new Promise((resolve, reject) => {
+    let over = false;
+    const end = (settle, value) => { if (!over) { over = true; clearTimeout(timer); settle(value); } };
+    const timer = setTimeout(() => end(reject, new Error('The private store did not answer')), PRIVATE_STORE_TIMEOUT_MS);
     const opening = indexedDB.open(PRIVATE_DB, 1);
     opening.onupgradeneeded = () => opening.result.createObjectStore(PRIVATE_STORE);
-    opening.onerror = () => reject(opening.error);
+    opening.onerror = () => end(reject, opening.error);
+    opening.onblocked = () => end(reject, new Error('The private store is blocked'));
     opening.onsuccess = () => {
       const db = opening.result;
+      if (over) { db.close(); return; } // it answered too late
       try {
         const transaction = db.transaction(PRIVATE_STORE, mode);
         const request = act(transaction.objectStore(PRIVATE_STORE));
-        transaction.oncomplete = () => { db.close(); resolve(request.result); };
-        transaction.onabort = () => { db.close(); reject(transaction.error); };
+        transaction.oncomplete = () => { db.close(); end(resolve, request.result); };
+        transaction.onabort = () => { db.close(); end(reject, transaction.error); };
       } catch (err) {
         db.close();
-        reject(err);
+        end(reject, err);
       }
     };
   });

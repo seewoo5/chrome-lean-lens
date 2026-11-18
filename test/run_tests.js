@@ -219,9 +219,10 @@ const fakeArea = (kept) => ({
 });
 // The extension's own IndexedDB, as far as the worker uses it: databases of stores of values, in
 // `kept`, with requests and transactions that end later, as the real ones do.
-const fakeIndexedDB = (kept) => ({
+const fakeIndexedDB = (kept, trouble = {}) => ({
   open(name) {
     const opening = {};
+    if (trouble.silent) return opening; // a database that never answers
     setTimeout(() => {
       const isNew = !kept[name];
       if (isNew) kept[name] = {};
@@ -267,11 +268,12 @@ loadScript('background/service_worker.js');
  * (`chrome.storage.session`; null where there is none). `setAccessLevel` is there only when
  * asked for: Firefox has none. Resolves messages sent as the options page, or as `sender`.
  */
-function startWorker({ local = {}, idb = {}, session = {}, setAccessLevel = false, fetch = null } = {}) {
+function startWorker({ local = {}, idb = {}, trouble = {}, session = {}, setAccessLevel = false, fetch = null } = {}) {
   const listeners = [];
-  const worker = { console, setTimeout, clearTimeout, Date, URL, AbortController, addEventListener: () => {} };
+  // (The worker's seconds pass as hundredths here, so that its time limits can be waited for.)
+  const worker = { console, setTimeout: (fn, ms) => setTimeout(fn, ms >= 1000 ? ms / 100 : ms), clearTimeout, Date, URL, AbortController, addEventListener: () => {} };
   worker.self = worker;
-  if (idb) worker.indexedDB = fakeIndexedDB(idb);
+  if (idb) worker.indexedDB = fakeIndexedDB(idb, trouble);
   if (fetch) worker.fetch = fetch;
   worker.chrome = {
     runtime: { id: 'lean-lens-test', getURL: (file) => `chrome-extension://lean-lens-test/${file}`, onMessage: { addListener: (fn) => listeners.push(fn) } },
@@ -2413,6 +2415,15 @@ console.log("22. Testing real Lean data (the local helper)...");
             assert.deepStrictEqual(freshIdb.lean_lens_private.values.helper_settings, {});
           }
         }
+
+        // A private store that never answers is given up on after a few seconds, like one that
+        // fails: the settings are still read, and saved for the session.
+        const stuck = { silent: true };
+        const stuckLocal = { lean_lens_settings: { theme: 'dark' } };
+        worker = startWorker({ local: stuckLocal, idb: {}, trouble: stuck, session: {} });
+        const answered = await Promise.race([worker({ action: 'GET_SETTINGS' }), tick(2000).then(() => null)]);
+        assert(answered && answered.settings.theme === 'dark' && answered.settings.helperToken === '', 'the settings are read although the private store is silent');
+        assert.strictEqual((await worker({ action: 'SET_SETTINGS', settings: { theme: 'dark', helperToken: 'new' } })).helperKept, 'session');
 
         // No IndexedDB for the extension: nothing says whether the move was made already, so
         // what `chrome.storage.local` has for the helper is removed and not used (the token is
