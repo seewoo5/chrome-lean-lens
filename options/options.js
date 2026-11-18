@@ -68,7 +68,9 @@ document.addEventListener('DOMContentLoaded', () => {
       // The helper's address and token are kept where no web page can reach them. Where the
       // browser gives the extension no such place that lasts, they are not saved for good.
       if (res && res.helperKept && res.helperKept !== 'saved' && currentSettings.enableHelper) {
-        helperTestResult.textContent = 'This browser gives the extension no private storage that lasts, so the helper\'s address and token are kept only until the browser closes: paste them again after that.';
+        helperTestResult.textContent = 'This browser gives the extension no private storage that lasts, so the helper\'s address and token are kept only '
+          + (res.helperKept === 'session' ? 'until the browser closes' : 'for a short while (until the browser stops the extension\'s background, as it does when it is not in use)')
+          + ': paste them again after that.';
         helperTestResult.style.color = '';
       }
 

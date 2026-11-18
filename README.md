@@ -172,7 +172,7 @@ In Chrome, right-click the toolbar icon → **Options**. In Firefox, open `about
 - **Hover delay** and **theme**
 - **Sources** for estimated hovers: the PR's own declarations, Loogle, built-in tactic docs
 - **File outline**: the Outline button and its placement hints
-- **Real Lean**: the helper's address and token, with a **Test Connection** button. These are kept apart from the other settings, in storage of the extension's own that scripts in web pages cannot read or change. A browser that gives the extension no such storage that lasts keeps them until it closes, and the options page says so.
+- **Real Lean**: the helper's address and token, with a **Test Connection** button. These are kept apart from the other settings, in storage of the extension's own that scripts in web pages cannot read or change. A browser that gives the extension no such storage that lasts keeps them until it closes, or only until it stops the extension's background (which browsers do after a short while without use); the options page says which, and they are pasted again after that.
 
 ## Development
 
