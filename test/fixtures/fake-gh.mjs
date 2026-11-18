@@ -25,6 +25,7 @@ const fail = (message) => {
 };
 const state = load();
 state.calls.push(args.slice(0, 2).join(' '));
+(state.argv = state.argv || []).push(args); // every call in full: the tests check which codespace each one named
 save(state);
 const home = (name) => path.join(dir, 'homes', name);
 const named = () => state.codespaces.find((space) => space.name === option('-c')) || fail(`no codespace named ${option('-c')}`);
@@ -82,6 +83,7 @@ if (args[0] === 'api') {
   save(state);
 } else if (args[1] === 'delete') {
   const space = named();
+  if (state.undeletable) fail('error deleting codespace: HTTP 503');
   stopHelper(space.name);
   state.codespaces = state.codespaces.filter((entry) => entry !== space);
   fs.rmSync(home(space.name), { recursive: true, force: true });

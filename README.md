@@ -134,7 +134,7 @@ Running Lean on a pull request runs that pull request's code: Lean executes code
 - **The code runs in a sandbox**, on macOS (`sandbox-exec`) and on Linux ([bubblewrap](https://github.com/containers/bubblewrap), which a codespace has). It has no network except while fetching the project's dependencies, cannot read or change your files, and gets none of your environment. Where there is no working sandbox (on Linux, when bubblewrap is missing or may not run), Lean does not run.
 - **In a codespace** the sandbox also keeps the code away from the codespace's GitHub token. Without a working sandbox nothing runs there either.
 
-The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` turns it off, which a project with private dependencies needs. Lean then runs with your permissions.
+The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` turns it off, which a project with private dependencies needs. Lean then runs with your permissions. In a codespace, where the code could then change the codespace itself and use its GitHub token, each such run gets a new codespace, deleted when the run is over: slower, since Lean is set up afresh each time. The helper notes the identifier GitHub gives that codespace (in `codespaces/` in its cache folder) before starting anything in it, and deletes that one only, never one found by its name or repository. If the helper stops before it can, the next start deletes what was noted and no running helper is using; failing all that, GitHub deletes it an hour after it stops.
 
 Worth knowing about what you allow:
 
@@ -160,7 +160,7 @@ Worth knowing about what you allow:
 | `--allow owner/repo` | Allow a repository ahead of time |
 | `--here owner/repo` | With `--codespaces`: run this repository on your machine all the same |
 | `--keep-builds` | Keep builds between runs: faster next time, more disk |
-| `--keep-codespaces` | Leave codespaces running when idle and when the helper stops |
+| `--keep-codespaces` | Leave codespaces running when idle and when the helper stops (not with `--no-sandbox`, where each run's codespace is deleted) |
 | `--tidy-after MINUTES` | How long an unused build or codespace stays (default 30) |
 | `--port N` | Listen on another port (default 5326) |
 | `--no-sandbox` | Run a project's code without the sandbox, with your permissions (without this, no sandbox means no run) |
