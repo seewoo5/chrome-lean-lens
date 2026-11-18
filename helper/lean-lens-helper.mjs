@@ -175,6 +175,26 @@ export function toolchainFiles(root) {
   return files;
 }
 
+/**
+ * The folder a Lean is installed in, from its `lake` (`<folder>/bin/lake`, the real file). It
+ * has to be a Lean installation and nothing else, since the helper takes the whole folder for
+ * that Lean (see `toolchainFiles`, and what a run is given of it): one with `lib/lean` in it,
+ * and not a place where other things are installed too (`/usr/local`), nor one that holds the
+ * home folder or one of `others` (the helper's own folders). elan's toolchains are such folders.
+ */
+export function leanInstallation(lake, { home = homedir(), others = [] } = {}) {
+  const root = path.dirname(path.dirname(lake));
+  const libraries = kind(path.join(root, 'lib', 'lean'));
+  if (path.basename(path.dirname(lake)) !== 'bin' || !libraries || !libraries.isDirectory()) {
+    throw new Error(`${lake} is not in a Lean installation (no lib/lean beside its bin folder). Install Lean with elan`);
+  }
+  const holds = (inner) => { const to = path.relative(root, realOrSame(inner)); return to === '' || (!to.startsWith('..') && !path.isAbsolute(to)); };
+  if (['/usr', '/usr/local'].some((shared) => holds(shared)) || [home, ...others].some(holds)) {
+    throw new Error(`Lean is installed in ${root}, with other things, and the helper needs a Lean in a folder of its own. Install Lean with elan`);
+  }
+  return root;
+}
+
 /** How SubVerso extractors are kept (see `extractorFor`). Raised when that changes: the ones kept before are removed. */
 export const EXTRACTOR_FORMAT = 2;
 
@@ -803,8 +823,10 @@ export function createHelper(options = {}) {
     const name = toolchainOf(root);
     // elan installs a missing version by itself, without a word, the moment it is asked about
     // it. So the helper looks first, says what is happening, and notes what it brought in.
+    let elanIsThere = true;
     const versions = async () => {
       const listed = await run('elan', ['toolchain', 'list']);
+      if (listed.code === -1 && /ENOENT/.test(listed.stderr)) elanIsThere = false;
       return listed.code === 0 ? listed.stdout.split('\n').map((line) => line.trim().split(/\s+/)[0]).filter(Boolean) : null;
     };
     const before = await versions();
@@ -815,12 +837,18 @@ export function createHelper(options = {}) {
         if (!config.toolchains.includes(added)) { config.toolchains.push(added); save(); }
       }
     }
-    // (By name, not by leaving elan to read the file again.)
-    let found = await run('elan', ['which', 'lake'], { env: { ...process.env, ELAN_TOOLCHAIN: name } });
-    // Without elan, whichever `lake` is installed.
-    if (found.code !== 0) found = await must('/usr/bin/which', ['lake']);
+    let found;
+    if (elanIsThere) {
+      // (By name, not by leaving elan to read the file again. When elan has no answer there is
+      // none: the `lake` on the PATH is then elan's stand-in, which would read the file.)
+      found = await run('elan', ['which', 'lake'], { env: { ...process.env, ELAN_TOOLCHAIN: name } });
+      if (found.code !== 0) throw new Error(`elan could not find Lake for ${name}: ${tail(found.stderr || found.stdout, 300) || `exit ${found.code}`}`);
+    } else {
+      // Without elan, whichever `lake` is installed.
+      found = await must('/usr/bin/which', ['lake']);
+    }
     const lake = realOrSame(found.stdout.trim().split('\n').pop());
-    const installed = path.dirname(path.dirname(lake));
+    const installed = leanInstallation(lake, { others: [cacheDir, buildsDir] });
     return { name, lake, bin: path.dirname(lake), root: installed, files: toolchainFiles(installed) };
   }
 

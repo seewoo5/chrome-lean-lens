@@ -1865,6 +1865,19 @@ console.log("22. Testing real Lean data (the local helper)...");
       assert.strictEqual(helper.toolchainOf(project), 'leanprover/lean4:v4.35.0');
       // Each Lean version has an extractor of its own, also versions whose names read alike.
       const rev = '892d6dc520270b5fb8c1291dd1b131e8c16255ed';
+      // The folder a Lean is installed in is that Lean's alone: it has `lib/lean`, and is not a
+      // place where other things are installed, the home folder or the helper's folders among them.
+      {
+        const at = fs.realpathSync(root);
+        for (const dir of ['own/bin', 'own/lib/lean', 'bare/bin', 'shared/bin', 'shared/lib/lean', 'shared/home/me', 'shared/cache']) fs.mkdirSync(path.join(at, dir), { recursive: true });
+        assert.strictEqual(helper.leanInstallation(path.join(at, 'own/bin/lake'), { home: path.join(at, 'shared/home/me') }), path.join(at, 'own'));
+        assert.throws(() => helper.leanInstallation(path.join(at, 'bare/bin/lake')), /not in a Lean installation/);
+        assert.throws(() => helper.leanInstallation(path.join(at, 'own/lake')), /not in a Lean installation/);
+        assert.throws(() => helper.leanInstallation(path.join(at, 'shared/bin/lake'), { home: path.join(at, 'shared/home/me') }), /folder of its own/);
+        assert.throws(() => helper.leanInstallation(path.join(at, 'shared/bin/lake'), { home: '/nowhere', others: [path.join(at, 'shared/cache')] }), /folder of its own/);
+        assert.throws(() => helper.leanInstallation(path.join(at, 'own/bin/lake'), { home: path.join(at, 'own') }), /folder of its own/);
+        if (process.platform !== 'win32') for (const lake of ['/usr/bin/lake', '/usr/local/bin/lake', '/bin/lake']) assert.throws(() => helper.leanInstallation(lake), /folder of its own|not in a Lean installation/);
+      }
       const lean = (name, at = '/toolchains/x', files = ['bin/lean 1 2']) => ({ name, root: at, files });
       const dirFor = (toolchain, from = 'https://example.invalid/subverso') => helper.extractorFor(toolchain, from, rev).dirName;
       assert(/^leanprover_lean4_v4\.35\.0-[0-9a-f]{32}$/.test(dirFor(lean('leanprover/lean4:v4.35.0'))));
@@ -2069,7 +2082,13 @@ console.log("22. Testing real Lean data (the local helper)...");
             '  *) exit 1 ;;',
             'esac',
           ];
-          for (const name of ['lean-a', 'lean-b']) script(path.join(toolchains, name, 'bin', 'lake'), lakeLines);
+          for (const name of ['lean-a', 'lean-b']) {
+            script(path.join(toolchains, name, 'bin', 'lake'), lakeLines);
+            fs.mkdirSync(path.join(toolchains, name, 'lib', 'lean'), { recursive: true });
+          }
+          // A Lean elan lists but has no Lake for, and one whose `lake` is not in a Lean installation.
+          fs.mkdirSync(path.join(toolchains, 'lean-c'));
+          script(path.join(toolchains, 'lean-d', 'bin', 'lake'), lakeLines);
           const subverso = path.join(stubs, 'subverso');
           fs.mkdirSync(subverso);
           git(subverso, 'init', '--quiet');
@@ -2091,6 +2110,8 @@ console.log("22. Testing real Lean data (the local helper)...");
           const lakefile = 'name = "p"\n';
           const shaS = projectAt('s', { 'lean-toolchain': 'lean-a\n', 'next-lean': 'lean-b\n', 'lakefile.toml': lakefile, 'Sample.lean': sample });
           const shaT = projectAt('t', { 'lean-toolchain': 'lean-b\n', 'lakefile.toml': lakefile, 'Sample.lean': sample, 'Again.lean': sample, 'More.lean': sample });
+          const shaU = projectAt('u', { 'lean-toolchain': 'lean-c\n', 'lakefile.toml': lakefile, 'Sample.lean': sample });
+          const shaV = projectAt('v', { 'lean-toolchain': 'lean-d\n', 'lakefile.toml': lakefile, 'Sample.lean': sample });
           const cache5 = path.join(root, 'cache5');
           const kept = path.join(cache5, 'extractors');
           // An extractor kept by an earlier version of the helper, under the name alone.
@@ -2138,6 +2159,17 @@ console.log("22. Testing real Lean data (the local helper)...");
             assert.strictEqual((await elaborate('o/t', shaT, 'Again.lean')).lean, 'lean-b');
             assert.deepStrictEqual(builtBy(), ['lean-a by lean-a', 'lean-b by lean-b', 'lean-b by lean-b']);
             assert.strictEqual(builds(), 3);
+            // When elan has no Lake for the Lean a project names, the run says so: it does not go
+            // on with whichever `lake` is on the PATH (elan's own stand-in, which reads the
+            // project's file again). And the Lake found has to be in a Lean installation.
+            for (const [repo, sha, why] of [['o/u', shaU, /^elan could not find Lake for lean-c/], ['o/v', shaV, /is not in a Lean installation/]]) {
+              h5.allow(repo);
+              h5.start({ repo, sha, pr: null, paths: ['Sample.lean'] });
+              while (h5.status(repo, sha).state === 'pending') await tick(20);
+              assert.match(h5.fileState(repo, sha, 'Sample.lean').error || '', why);
+              await h5.idle();
+            }
+            assert.deepStrictEqual(builtBy(), ['lean-a by lean-a', 'lean-b by lean-b', 'lean-b by lean-b']);
           } finally {
             process.env.PATH = pathBefore;
             h5.shutdown();
