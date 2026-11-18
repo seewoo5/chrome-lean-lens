@@ -2394,23 +2394,46 @@ console.log("22. Testing real Lean data (the local helper)...");
         assert.deepStrictEqual(former, { lean_lens_settings: { theme: 'dark' } });
         assert.strictEqual(formerIdb.lean_lens_private.values.helper_settings.helperToken, 'tok');
 
-        // No IndexedDB for the extension either: the token still leaves `chrome.storage.local`.
-        // It is kept for the session, where content scripts cannot read, and the page is told.
+        // The move happens once. A browser where nothing was ever saved for the helper (a new
+        // install, or a reader who never used it) gets an empty record in the private store as
+        // the worker first starts; what a page's script then puts in `chrome.storage.local` is
+        // not taken for the helper's settings, by this worker or by a later one, only removed.
+        for (const before of [{}, { lean_lens_settings: { theme: 'dark' } }]) {
+          const fresh = JSON.parse(JSON.stringify(before));
+          const freshIdb = {};
+          worker = startWorker({ local: fresh, idb: freshIdb });
+          await tick(20); // the worker reads the settings by itself as it starts
+          assert.deepStrictEqual(freshIdb.lean_lens_private.values.helper_settings, {}, 'the private store has its record before any message');
+          const planted = { enableHelper: true, helperUrl: 'http://127.0.0.1:9999', helperToken: 'theirs' };
+          for (const reader of [worker, startWorker({ local: fresh, idb: freshIdb })]) {
+            fresh.lean_lens_settings = Object.assign({ theme: 'light' }, planted);
+            const got = (await reader({ action: 'GET_SETTINGS' })).settings;
+            assert.deepStrictEqual([got.theme, got.enableHelper, got.helperUrl, got.helperToken], ['light', false, 'http://127.0.0.1:5326', ''], 'planted settings are not adopted');
+            assert.deepStrictEqual(fresh.lean_lens_settings, { theme: 'light' });
+            assert.deepStrictEqual(freshIdb.lean_lens_private.values.helper_settings, {});
+          }
+        }
+
+        // No IndexedDB for the extension: nothing says whether the move was made already, so
+        // what `chrome.storage.local` has for the helper is removed and not used (the token is
+        // pasted again). What is saved then is kept for the session, where content scripts
+        // cannot read, and the page is told.
         const bare = earlier();
         const session = {};
         worker = startWorker({ local: bare, idb: null, session });
-        assert.strictEqual((await worker({ action: 'GET_SETTINGS' })).settings.helperToken, 'tok');
+        assert.strictEqual((await worker({ action: 'GET_SETTINGS' })).settings.helperToken, '');
         assert.deepStrictEqual(bare.lean_lens_settings, { theme: 'dark' });
-        assert.strictEqual(session.helper_settings.helperToken, 'tok');
+        assert.deepStrictEqual(session, {});
         assert.strictEqual((await worker({ action: 'SET_SETTINGS', settings: { enableHelper: true, helperUrl: 'http://127.0.0.1:5326', helperToken: 'new' } })).helperKept, 'session');
         assert.strictEqual((await startWorker({ local: bare, idb: null, session })({ action: 'GET_SETTINGS' })).settings.helperToken, 'new');
         assert(!JSON.stringify(bare).includes('new'));
         // Not even that: it lasts as long as the worker does.
         const none = earlier();
         worker = startWorker({ local: none, idb: null, session: null });
-        assert.strictEqual((await worker({ action: 'GET_SETTINGS' })).settings.helperToken, 'tok');
+        assert.strictEqual((await worker({ action: 'GET_SETTINGS' })).settings.helperToken, '');
         assert.deepStrictEqual(none.lean_lens_settings, { theme: 'dark' });
         assert.strictEqual((await worker({ action: 'SET_SETTINGS', settings: { helperToken: 'new' } })).helperKept, 'memory');
+        assert.strictEqual((await worker({ action: 'GET_SETTINGS' })).settings.helperToken, 'new');
         assert.strictEqual((await startWorker({ local: none, idb: null, session: null })({ action: 'GET_SETTINGS' })).settings.helperToken, '');
         assert.strictEqual((await startWorker({ local: {}, idb: {} })({ action: 'SET_SETTINGS', settings: { helperToken: 'kept' } })).helperKept, 'saved');
       }

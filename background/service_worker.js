@@ -86,9 +86,13 @@ const inArea = (area, method, argument) => new Promise((resolve, reject) => {
 
 let helperSettings; // as last read or written: `{ values, kept }`, `values` null when none are saved
 
-/** The helper's settings as saved, or null: read once, then remembered while the worker lives. */
+/**
+ * The helper's settings as saved (null when the private store has never held any) and where
+ * they were read from ('saved', 'session' or 'memory', as `writeHelperSettings` resolves to):
+ * read once, then remembered while the worker lives.
+ */
 async function readHelperSettings() {
-  if (helperSettings) return helperSettings.values;
+  if (helperSettings) return helperSettings;
   let values = null;
   let kept = 'saved';
   try {
@@ -98,7 +102,7 @@ async function readHelperSettings() {
     try { values = (await inArea(sessionArea(), 'get', [HELPER_SETTINGS_KEY]))[HELPER_SETTINGS_KEY] || null; } catch (err2) { kept = 'memory'; }
   }
   if (!helperSettings) helperSettings = { values, kept };
-  return helperSettings.values;
+  return helperSettings;
 }
 
 /**
@@ -139,15 +143,22 @@ function getSettings() {
     // One-time migration from the extension's former name ("Verso").
     const legacy = !saved && stored[LEGACY_SETTINGS_KEY];
     if (legacy) saved = legacy;
-    let helper = await readHelperSettings();
-    // Settings saved by a version that kept the helper's with the others: those are moved to
-    // the private store and removed from here. Once the private store has some, any found here
-    // are not ours (a page's script may have written them) and are only removed.
+    let { values: helper, kept } = await readHelperSettings();
+    // Settings saved by a version that kept the helper's with the others are moved to the
+    // private store, once: the first time the private store is read and found empty, it gets
+    // what is here for the helper, or nothing, and from then on it has a record. After that,
+    // and whenever the private store cannot be read (so that nothing says whether that first
+    // time is past), what is found here for the helper is not ours (a page's script may have
+    // written it) and is only removed.
     const stray = pick(saved, HELPER_SETTINGS);
-    if (Object.keys(stray).length) {
-      if (!helper) { await writeHelperSettings(stray); helper = stray; }
-      saved = without(saved, HELPER_SETTINGS);
+    if (kept === 'saved' && !helper) {
+      try {
+        await privateStore('readwrite', (store) => store.put(stray, HELPER_SETTINGS_KEY));
+        helper = stray;
+        helperSettings = { values: helper, kept };
+      } catch (err) { /* not moved, and asked again by the next read */ helperSettings = undefined; }
     }
+    if (Object.keys(stray).length) saved = without(saved, HELPER_SETTINGS);
     if (legacy || Object.keys(stray).length) {
       await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: saved }).catch(() => {});
       if (legacy) await inArea(chrome.storage.local, 'remove', LEGACY_SETTINGS_KEY).catch(() => {});
@@ -155,6 +166,10 @@ function getSettings() {
     return Object.assign({}, DEFAULT_SETTINGS, saved || {}, pick(helper, HELPER_SETTINGS));
   });
 }
+
+// The settings are read once as the worker starts, so that the private store has its record
+// (see `getSettings`) from the moment the extension is installed or updated, before any page.
+Promise.resolve().then(getSettings).catch(() => {});
 
 /** Save the settings: the helper's privately, the others in `chrome.storage.local`. */
 function setSettings(settings) {
