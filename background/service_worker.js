@@ -94,41 +94,73 @@ const inArea = (area, method, argument) => new Promise((resolve, reject) => {
   } catch (err) { reject(err); }
 });
 
-let helperSettings; // as last read or written: `{ values, kept }`, `values` null when none are saved
+// The private store's record, once read or written there: `{ values }`, `values` null when it
+// has none. Remembered while the worker lives, since only this worker writes it. A read that
+// failed is not remembered: the store is tried again, though not at once.
+let helperSaved;
+let privateFailedAt = 0; // when the private store last failed or did not answer
+const PRIVATE_STORE_RETRY_MS = 30 * 1000;
+let helperInMemory = null; // the helper's settings when neither store nor session can hold them
+// What was given out for the helper while the private store could not be read (as JSON), or null.
+let shownWithoutStore = null;
 
-/**
- * The helper's settings as saved (null when the private store has never held any) and where
- * they were read from ('saved', 'session' or 'memory', as `writeHelperSettings` resolves to):
- * read once, then remembered while the worker lives.
- */
-async function readHelperSettings() {
-  if (helperSettings) return helperSettings;
-  let values = null;
-  let kept = 'saved';
-  try {
-    values = (await privateStore('readonly', (store) => store.get(HELPER_SETTINGS_KEY))) || null;
-  } catch (err) {
-    kept = 'session';
-    try { values = (await inArea(sessionArea(), 'get', [HELPER_SETTINGS_KEY]))[HELPER_SETTINGS_KEY] || null; } catch (err2) { kept = 'memory'; }
-  }
-  if (!helperSettings) helperSettings = { values, kept };
-  return helperSettings;
+const readRecord = (store) => store.get(HELPER_SETTINGS_KEY);
+/** An operation on the private store, unless it failed a moment ago (see `PRIVATE_STORE_TIMEOUT_MS`). */
+function privateStoreNow(mode, act) {
+  if (Date.now() - privateFailedAt < PRIVATE_STORE_RETRY_MS) return Promise.reject(new Error('The private store failed a moment ago'));
+  return privateStore(mode, act).catch((err) => { privateFailedAt = Date.now(); throw err; });
 }
 
 /**
+ * The helper's settings as saved (null when none are), and where they were read from: 'saved'
+ * (the private store), 'session' or 'memory' (as `writeHelperSettings` resolves to).
+ */
+async function readHelperSettings() {
+  if (!helperSaved) {
+    try {
+      helperSaved = { values: (await privateStoreNow('readonly', readRecord)) || null };
+    } catch (err) {
+      try {
+        return { values: (await inArea(sessionArea(), 'get', [HELPER_SETTINGS_KEY]))[HELPER_SETTINGS_KEY] || null, kept: 'session' };
+      } catch (err2) {
+        return { values: helperInMemory, kept: 'memory' };
+      }
+    }
+  }
+  return { values: helperSaved.values, kept: 'saved' };
+}
+
+/** The helper's settings as a page is given them, as text to compare. */
+const helperView = (values) => JSON.stringify(pick(Object.assign({}, DEFAULT_SETTINGS, values), HELPER_SETTINGS));
+
+/**
  * Saves the helper's settings. Resolves to how long they are kept: 'saved' (for good),
- * 'session' (until the browser closes) or 'memory' (until this worker stops).
+ * 'session' (until the browser closes) or 'memory' (until this worker stops, which a browser
+ * makes it do after a short while without use).
  */
 async function writeHelperSettings(values) {
-  let kept = 'saved';
   try {
-    await privateStore('readwrite', (store) => store.put(values, HELPER_SETTINGS_KEY));
+    if (!helperSaved && shownWithoutStore !== null) {
+      // The page saving these was shown the settings while the private store could not be
+      // read. It saves all of them at every change, so if the store can be read now and has a
+      // record, and the helper's settings come back as they were shown, nobody changed them:
+      // the record stays, rather than be replaced by what was shown for want of it.
+      helperSaved = { values: (await privateStoreNow('readonly', readRecord)) || null };
+      if (helperSaved.values && helperView(values) === shownWithoutStore) return 'saved';
+    }
+    await privateStoreNow('readwrite', (store) => store.put(values, HELPER_SETTINGS_KEY));
+    helperSaved = { values };
+    shownWithoutStore = null;
+    return 'saved';
   } catch (err) {
-    kept = 'session';
-    try { await inArea(sessionArea(), 'set', { [HELPER_SETTINGS_KEY]: values }); } catch (err2) { kept = 'memory'; }
+    try {
+      await inArea(sessionArea(), 'set', { [HELPER_SETTINGS_KEY]: values });
+      return 'session';
+    } catch (err2) {
+      helperInMemory = values;
+      return 'memory';
+    }
   }
-  helperSettings = { values, kept };
-  return kept;
 }
 
 const pick = (from, keys) => Object.fromEntries(keys.filter((key) => from && Object.prototype.hasOwnProperty.call(from, key)).map((key) => [key, from[key]]));
@@ -161,15 +193,21 @@ function getSettings() {
     // time is past), what is found here for the helper is not ours (a page's script may have
     // written it) and is only removed.
     const stray = pick(saved, HELPER_SETTINGS);
+    let moved = true;
     if (kept === 'saved' && !helper) {
       try {
-        await privateStore('readwrite', (store) => store.put(stray, HELPER_SETTINGS_KEY));
+        await privateStoreNow('readwrite', (store) => store.put(stray, HELPER_SETTINGS_KEY));
         helper = stray;
-        helperSettings = { values: helper, kept };
-      } catch (err) { /* not moved, and asked again by the next read */ helperSettings = undefined; }
+        helperSaved = { values: helper };
+      } catch (err) {
+        // The store was read and then failed: what is here stays for the next read to move.
+        helperSaved = undefined;
+        moved = false;
+      }
     }
+    if (kept !== 'saved') shownWithoutStore = helperView(helper);
     if (Object.keys(stray).length) saved = without(saved, HELPER_SETTINGS);
-    if (legacy || Object.keys(stray).length) {
+    if (moved && (legacy || Object.keys(stray).length)) {
       await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: saved }).catch(() => {});
       if (legacy) await inArea(chrome.storage.local, 'remove', LEGACY_SETTINGS_KEY).catch(() => {});
     }

@@ -223,6 +223,7 @@ const fakeIndexedDB = (kept, trouble = {}) => ({
   open(name) {
     const opening = {};
     if (trouble.silent) return opening; // a database that never answers
+    if (trouble.failing) { setTimeout(() => opening.onerror && opening.onerror(), 0); return opening; }
     setTimeout(() => {
       const isNew = !kept[name];
       if (isNew) kept[name] = {};
@@ -268,10 +269,11 @@ loadScript('background/service_worker.js');
  * (`chrome.storage.session`; null where there is none). `setAccessLevel` is there only when
  * asked for: Firefox has none. Resolves messages sent as the options page, or as `sender`.
  */
-function startWorker({ local = {}, idb = {}, trouble = {}, session = {}, setAccessLevel = false, fetch = null } = {}) {
+function startWorker({ local = {}, idb = {}, trouble = {}, session = {}, setAccessLevel = false, fetch = null, clock = { ahead: 0 } } = {}) {
   const listeners = [];
+  class WorkerDate extends Date { static now() { return Date.now() + clock.ahead; } } // `clock.ahead`: milliseconds the worker's clock is ahead
   // (The worker's seconds pass as hundredths here, so that its time limits can be waited for.)
-  const worker = { console, setTimeout: (fn, ms) => setTimeout(fn, ms >= 1000 ? ms / 100 : ms), clearTimeout, Date, URL, AbortController, addEventListener: () => {} };
+  const worker = { console, setTimeout: (fn, ms) => setTimeout(fn, ms >= 1000 ? ms / 100 : ms), clearTimeout, Date: WorkerDate, URL, AbortController, addEventListener: () => {} };
   worker.self = worker;
   if (idb) worker.indexedDB = fakeIndexedDB(idb, trouble);
   if (fetch) worker.fetch = fetch;
@@ -2424,6 +2426,40 @@ console.log("22. Testing real Lean data (the local helper)...");
         const answered = await Promise.race([worker({ action: 'GET_SETTINGS' }), tick(2000).then(() => null)]);
         assert(answered && answered.settings.theme === 'dark' && answered.settings.helperToken === '', 'the settings are read although the private store is silent');
         assert.strictEqual((await worker({ action: 'SET_SETTINGS', settings: { theme: 'dark', helperToken: 'new' } })).helperKept, 'session');
+
+        // A private store that fails for a while, with the helper's settings in it. The options
+        // page, opened then, is shown none, and saves all the settings at any change. When the
+        // store works again, its record is read again; and a save that brings back the helper's
+        // settings as they were shown (here, with another theme) does not replace it.
+        for (const typed of [false, true]) {
+          const record = { enableHelper: true, helperUrl: 'http://127.0.0.1:5326', helperToken: 'tok' };
+          const flakyIdb = { lean_lens_private: { values: { helper_settings: Object.assign({}, record) } } };
+          const flaky = { failing: true };
+          const clock = { ahead: 0 };
+          worker = startWorker({ local: { lean_lens_settings: { theme: 'dark' } }, idb: flakyIdb, trouble: flaky, clock });
+          const blank = (await worker({ action: 'GET_SETTINGS' })).settings;
+          assert.deepStrictEqual([blank.enableHelper, blank.helperToken], [false, '']);
+          flaky.failing = false;
+          clock.ahead = 60 * 1000;
+          if (!typed) {
+            assert.strictEqual((await worker({ action: 'SET_SETTINGS', settings: Object.assign({}, blank, { theme: 'light' }) })).helperKept, 'saved');
+            assert.deepStrictEqual(flakyIdb.lean_lens_private.values.helper_settings, record, 'the record is not replaced by the blanks that were shown');
+            const again = (await worker({ action: 'GET_SETTINGS' })).settings;
+            assert.deepStrictEqual([again.theme, again.enableHelper, again.helperToken], ['light', true, 'tok']);
+          } else {
+            // Settings for the helper that were typed in meanwhile are saved.
+            await worker({ action: 'SET_SETTINGS', settings: Object.assign({}, blank, { enableHelper: true, helperToken: 'typed' }) });
+            assert.strictEqual(flakyIdb.lean_lens_private.values.helper_settings.helperToken, 'typed');
+          }
+          // (And without any save: the record is simply read again.)
+          flaky.failing = true;
+          const other = startWorker({ local: {}, idb: flakyIdb, trouble: flaky, clock });
+          assert.strictEqual((await other({ action: 'GET_SETTINGS' })).settings.helperToken, '');
+          flaky.failing = false;
+          assert.strictEqual((await other({ action: 'GET_SETTINGS' })).settings.helperToken, '', 'not tried again at once');
+          clock.ahead += 60 * 1000;
+          assert.strictEqual((await other({ action: 'GET_SETTINGS' })).settings.helperToken, typed ? 'typed' : 'tok');
+        }
 
         // No IndexedDB for the extension: nothing says whether the move was made already, so
         // what `chrome.storage.local` has for the helper is removed and not used (the token is
