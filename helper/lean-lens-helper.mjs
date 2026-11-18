@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync,
-  statfsSync, writeFileSync,
+  statSync, statfsSync, writeFileSync,
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { availableParallelism, homedir } from 'node:os';
@@ -159,13 +159,39 @@ export function toolchainOf(root) {
 }
 
 /**
- * The folder name of the SubVerso extractor for a Lean version. Each version gets its own: the
- * name is readable, and ends with a hash of the version's exact name, since several names read
- * the same once `/` and `:` are replaced (`a_b/c:d` and `a/b_c:d`), and two versions must not
- * share an extractor built with only one of them.
+ * What tells one installed Lean from another, as the helper sees it without running any of it:
+ * the name and size of each program and shared library, and when it was last written. A name
+ * like `stable` means another Lean after a release, and a toolchain linked from a local build
+ * changes when it is built again; either way these change with it.
  */
-export function extractorDirName(toolchainName, subversoRev) {
-  return `${toolchainName.replace(/[^A-Za-z0-9._-]+/g, '_')}-${sha256(toolchainName).slice(0, 32)}-${subversoRev.slice(0, 12)}`;
+export function toolchainFiles(root) {
+  const files = [];
+  for (const [dir, wanted] of [['bin', /./], [path.join('lib', 'lean'), /\.(so|dylib|dll)\b/]]) {
+    for (const name of entries(path.join(root, dir)).filter((entry) => wanted.test(entry)).sort()) {
+      const stat = statSync(path.join(root, dir, name), { throwIfNoEntry: false });
+      if (stat && stat.isFile()) files.push(`${dir}/${name} ${stat.size} ${Math.floor(stat.mtimeMs)}`);
+    }
+  }
+  return files;
+}
+
+/** How SubVerso extractors are kept (see `extractorFor`). Raised when that changes: the ones kept before are removed. */
+export const EXTRACTOR_FORMAT = 2;
+
+/**
+ * Where the SubVerso extractor built by a Lean is kept, and what says it is that one.
+ * `toolchain` is the Lean a run resolved, once, before any of the project's code ran (see
+ * `resolveToolchain`): the name the project gave it, where it is installed, and its files.
+ * The extractor is built by that Lean and kept for it alone: the folder's name ends with a hash
+ * of all of this (the readable part before it is the name, of which several read the same once
+ * `/` and `:` are replaced, as `a_b/c:d` and `a/b_c:d`), and `stamp` is written next to the
+ * extractor once it is built, so one is used only when everything about its Lean is the same.
+ */
+export function extractorFor(toolchain, subverso, subversoRev) {
+  const stamp = JSON.stringify({
+    format: EXTRACTOR_FORMAT, lean: toolchain.name, toolchain: toolchain.root, files: toolchain.files, subverso, subversoRev,
+  });
+  return { stamp, dirName: `${toolchain.name.replace(/[^A-Za-z0-9._-]+/g, '_')}-${sha256(stamp).slice(0, 32)}` };
 }
 
 export function formatBytes(bytes) {
@@ -516,6 +542,7 @@ export function createHelper(options = {}) {
   const latestJob = new Map(); // repo@sha → the job last started for that commit
   const fileStates = new Map(); // repo@sha:path → {state: 'queued' | 'running' | 'error', error}
   const extractorBuilds = new Map(); // directory → promise of the extractor binary
+  let oldExtractorsGone = false; // whether extractors kept in an earlier way were removed
 
   const repoDir = (repo) => path.join(buildsDir, 'repos', ...repo.split('/'));
   // Scratch folders, one per run, named after this process so that a later helper can tell
@@ -762,9 +789,13 @@ export function createHelper(options = {}) {
   }
 
   /**
-   * Where the project's Lean lives: `{ lake, bin, root }`, the real programs rather than elan's
-   * stand-ins, so they can be run directly. elan only reads the project's `lean-toolchain` here
-   * (and downloads that version if it is missing); nothing of the project is run.
+   * The project's Lean: `{ name, lake, bin, root, files }`, with the real programs rather than
+   * elan's stand-ins, so they can be run directly. The project's `lean-toolchain` is read here,
+   * once, before any of the project's code runs, and elan is told that name (it downloads that
+   * version if it is missing); nothing of the project is run. What is returned is the Lean of
+   * the whole run: the project's code can rewrite `lean-toolchain` afterwards, and the helper
+   * does not read it again, so the Lean that builds the project, the one whose extractor is
+   * used and the one named in the results are the same.
    */
   async function resolveToolchain(root, job) {
     const name = toolchainOf(root);
@@ -782,11 +813,13 @@ export function createHelper(options = {}) {
         if (!config.toolchains.includes(added)) { config.toolchains.push(added); save(); }
       }
     }
-    let found = await run('elan', ['which', 'lake'], { cwd: root });
+    // (By name, not by leaving elan to read the file again.)
+    let found = await run('elan', ['which', 'lake'], { env: { ...process.env, ELAN_TOOLCHAIN: name } });
     // Without elan, whichever `lake` is installed.
     if (found.code !== 0) found = await must('/usr/bin/which', ['lake']);
     const lake = realOrSame(found.stdout.trim().split('\n').pop());
-    return { lake, bin: path.dirname(lake), root: path.dirname(path.dirname(lake)) };
+    const installed = path.dirname(path.dirname(lake));
+    return { name, lake, bin: path.dirname(lake), root: installed, files: toolchainFiles(installed) };
   }
 
   /** Whether Mathlib's prebuilt files are there (in a project that uses Mathlib, or is it). */
@@ -844,13 +877,28 @@ export function createHelper(options = {}) {
     if (result.code !== 0) job.note(`\`lake build\` of the imports failed: ${tail(result.stderr || result.stdout, 400)}`);
   }
 
-  /** The SubVerso extractor for a Lean version, built once and kept. */
-  function ensureExtractor(root, toolchain, job, workDir) {
-    const name = toolchainOf(root);
-    const dir = path.join(cacheDir, 'extractors', extractorDirName(name, subversoRev));
+  /**
+   * The SubVerso extractor for the Lean a run resolved (`toolchain`), built once by that Lean and
+   * kept for it (see `extractorFor`). The project's checkout has no say in which one it is.
+   */
+  function ensureExtractor(toolchain, job, workDir) {
+    const { name } = toolchain;
+    const kept = path.join(cacheDir, 'extractors', `v${EXTRACTOR_FORMAT}`);
+    if (!oldExtractorsGone) {
+      // Extractors kept in an earlier way (by the project's name for its Lean alone): not used.
+      oldExtractorsGone = true;
+      for (const entry of entries(path.dirname(kept))) if (entry !== path.basename(kept)) rmSync(path.join(path.dirname(kept), entry), GONE);
+    }
+    const { stamp, dirName } = extractorFor(toolchain, subverso, subversoRev);
+    const dir = path.join(kept, dirName);
     const binary = path.join(dir, '.lake', 'build', 'bin', 'subverso-extract-mod');
-    if (existsSync(binary)) return Promise.resolve({ binary, dir });
+    const builtFile = path.join(dir, 'lean-lens-extractor.json');
+    const isBuilt = () => {
+      // (The stamp is the helper's: a plain file, written when the build was over.)
+      try { return existsSync(binary) && kind(builtFile).isFile() && readFileSync(builtFile, 'utf8') === stamp; } catch { return false; }
+    };
     if (!extractorBuilds.has(dir)) {
+      if (isBuilt()) return Promise.resolve({ binary, dir });
       extractorBuilds.set(dir, (async () => {
         job.say(`Building the SubVerso extractor for ${name} (once per Lean version)`);
         rmSync(dir, GONE);
@@ -865,6 +913,8 @@ export function createHelper(options = {}) {
         if (built.code !== 0 || !existsSync(binary)) {
           throw new Error(`SubVerso's extractor did not build for ${name}: ${tail(built.stderr || built.stdout, 300) || 'no output'}`);
         }
+        rmSync(builtFile, GONE); // whatever the build left there
+        writeFileSync(builtFile, stamp);
         return { binary, dir };
       })().finally(() => extractorBuilds.delete(dir)));
     }
@@ -959,8 +1009,8 @@ export function createHelper(options = {}) {
         const toolchain = await resolveToolchain(root, job);
         await ensureDependencies(root, rootDir, toolchain, job, workDir);
         await buildImports(root, files.map((file) => file.path), toolchain, job, scratch);
-        const extractor = await ensureExtractor(root, toolchain, job, workDir);
-        const context = { extractor, toolchain, scratch, out, name: toolchainOf(root), srcPath: await sourceRoots(root, toolchain, job, scratch) };
+        const extractor = await ensureExtractor(toolchain, job, workDir);
+        const context = { extractor, toolchain, scratch, out, name: toolchain.name, srcPath: await sourceRoots(root, toolchain, job, scratch) };
         job.phase = 'elaborating';
         job.say(`Elaborating ${files.length} file${files.length === 1 ? '' : 's'}`);
         let next = 0;

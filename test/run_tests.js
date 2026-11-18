@@ -1865,8 +1865,15 @@ console.log("22. Testing real Lean data (the local helper)...");
       assert.strictEqual(helper.toolchainOf(project), 'leanprover/lean4:v4.35.0');
       // Each Lean version has an extractor of its own, also versions whose names read alike.
       const rev = '892d6dc520270b5fb8c1291dd1b131e8c16255ed';
-      assert(/^leanprover_lean4_v4\.35\.0-[0-9a-f]{32}-892d6dc52027$/.test(helper.extractorDirName('leanprover/lean4:v4.35.0', rev)));
-      assert.notStrictEqual(helper.extractorDirName('a_b/c:d', rev), helper.extractorDirName('a/b_c:d', rev));
+      const lean = (name, at = '/toolchains/x', files = ['bin/lean 1 2']) => ({ name, root: at, files });
+      const dirFor = (toolchain, from = 'https://example.invalid/subverso') => helper.extractorFor(toolchain, from, rev).dirName;
+      assert(/^leanprover_lean4_v4\.35\.0-[0-9a-f]{32}$/.test(dirFor(lean('leanprover/lean4:v4.35.0'))));
+      assert.strictEqual(dirFor(lean('a/b:c')), dirFor(lean('a/b:c')));
+      assert.notStrictEqual(dirFor(lean('a_b/c:d')), dirFor(lean('a/b_c:d')));
+      assert.notStrictEqual(dirFor(lean('a/b:stable', '/toolchains/v1')), dirFor(lean('a/b:stable', '/toolchains/v2')));
+      assert.notStrictEqual(dirFor(lean('a/b:stable', '/t', ['bin/lean 1 2'])), dirFor(lean('a/b:stable', '/t', ['bin/lean 1 3'])));
+      assert.notStrictEqual(dirFor(lean('a/b:c')), dirFor(lean('a/b:c'), 'https://example.invalid/other'));
+      assert.notStrictEqual(dirFor(lean('a/b:c')), helper.extractorFor(lean('a/b:c'), 'https://example.invalid/subverso', 'f'.repeat(40)).dirName);
       fs.writeFileSync(path.join(project, 'lean-toolchain'), 'v4; curl example.com\n');
       assert.throws(() => helper.toolchainOf(project), /does not name a Lean version/);
       fs.rmSync(path.join(project, 'lean-toolchain'));
@@ -2027,6 +2034,108 @@ console.log("22. Testing real Lean data (the local helper)...");
         assert(fs.lstatSync(copy3).isDirectory(), 'a real folder now');
         assert.strictEqual(fs.readFileSync(path.join(theirs, 'mine.txt'), 'utf8'), 'mine');
         assert(!fs.existsSync(path.join(theirs, 'A.lean')), 'nothing was checked out through the link');
+
+        // --- The Lean of a run is resolved once, before the project's code runs. Lean, Lake and
+        // elan are played by scripts: `lean-a` and `lean-b` are two installed Leans, each of whose
+        // `lake` signs the extractor it builds. The project o/s asks for lean-a, and its code
+        // (which `lake` runs while preparing the project) then rewrites `lean-toolchain` to
+        // lean-b. Its files are still elaborated by lean-a, with an extractor kept for lean-a,
+        // and their results say lean-a; a project that asks for lean-b gets one built by lean-b.
+        if (process.platform !== 'win32') {
+          const stubs = path.join(root, 'stub-lean');
+          const toolchains = path.join(stubs, 'toolchains');
+          const script = (file, lines) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, ['#!/bin/sh', ...lines, ''].join('\n'), { mode: 0o755 }); };
+          script(path.join(stubs, 'bin', 'elan'), [
+            'name="${ELAN_TOOLCHAIN:-$(cat lean-toolchain 2>/dev/null)}"',
+            'case "$1 $2" in',
+            `  "toolchain list") ls "${toolchains}" ;;`,
+            `  "which lake") [ -x "${toolchains}/$name/bin/lake" ] && echo "${toolchains}/$name/bin/lake" ;;`,
+            '  *) exit 1 ;;',
+            'esac',
+          ]);
+          const lakeLines = [
+            'me="$(basename "$(dirname "$(dirname "$0")")")"',
+            'case "$1 $2" in',
+            // (the project's own code, as its lakefile would run it)
+            `  "env true") if [ -f next-lean ]; then cp next-lean lean-toolchain; echo "$me" >> "${stubs}/switched"; fi ;;`,
+            '  "build subverso-extract-mod")',
+            '    mkdir -p .lake/build/bin',
+            `    printf '#!/bin/sh\\necho "%s" >> "${stubs}/used"\\ncp "${path.join(__dirname, 'fixtures', 'Sample.subverso.json')}" "$2"\\n' "$me" > .lake/build/bin/subverso-extract-mod`,
+            '    chmod +x .lake/build/bin/subverso-extract-mod',
+            '    echo "$me" > built-by ;;',
+            '  "build "*) ;;',
+            '  "env printenv") pwd ;;',
+            '  "env "*) shift; exec "$@" ;;',
+            '  *) exit 1 ;;',
+            'esac',
+          ];
+          for (const name of ['lean-a', 'lean-b']) script(path.join(toolchains, name, 'bin', 'lake'), lakeLines);
+          const subverso = path.join(stubs, 'subverso');
+          fs.mkdirSync(subverso);
+          git(subverso, 'init', '--quiet');
+          fs.writeFileSync(path.join(subverso, 'lakefile.toml'), 'name = "subverso"\n');
+          git(subverso, 'add', '.');
+          git(subverso, 'commit', '--quiet', '-m', 'subverso');
+          const subversoRev = git(subverso, 'rev-parse', 'HEAD');
+          const projectAt = (name, files) => {
+            const at = path.join(stubs, name);
+            fs.mkdirSync(at);
+            git(at, 'init', '--quiet');
+            for (const [file, text] of Object.entries(files)) fs.writeFileSync(path.join(at, file), text);
+            git(at, 'add', '.');
+            git(at, 'commit', '--quiet', '-m', 'one');
+            git(root, 'clone', '--quiet', '--bare', at, path.join(root, 'remotes', 'o', `${name}.git`));
+            return git(at, 'rev-parse', 'HEAD');
+          };
+          const sample = fs.readFileSync(path.join(__dirname, 'fixtures', 'Sample.lean'), 'utf8');
+          const lakefile = 'name = "p"\n';
+          const shaS = projectAt('s', { 'lean-toolchain': 'lean-a\n', 'next-lean': 'lean-b\n', 'lakefile.toml': lakefile, 'Sample.lean': sample });
+          const shaT = projectAt('t', { 'lean-toolchain': 'lean-b\n', 'lakefile.toml': lakefile, 'Sample.lean': sample, 'Again.lean': sample });
+          const cache5 = path.join(root, 'cache5');
+          const kept = path.join(cache5, 'extractors');
+          // An extractor kept by an earlier version of the helper, under the name alone.
+          fs.mkdirSync(path.join(kept, `lean-b-${'0'.repeat(32)}-${subversoRev.slice(0, 12)}`, '.lake', 'build', 'bin'), { recursive: true });
+          fs.writeFileSync(path.join(kept, `lean-b-${'0'.repeat(32)}-${subversoRev.slice(0, 12)}`, '.lake', 'build', 'bin', 'subverso-extract-mod'), 'old');
+          const said = [];
+          const h5 = helper.createHelper({ cacheDir: cache5, cloneBase, subverso, subversoRev, sandbox: false, log: (line) => said.push(line) });
+          const elaborate = async (repo, sha, file) => {
+            h5.allow(repo);
+            h5.start({ repo, sha, pr: null, paths: [file] });
+            while (h5.status(repo, sha).state === 'pending') await tick(20);
+            assert.strictEqual(h5.fileState(repo, sha, file).state, 'ready', `${h5.status(repo, sha).error || h5.fileState(repo, sha, file).error}\n${said.join('\n')}`);
+            await h5.idle();
+            return JSON.parse(h5.readData(repo, sha, file));
+          };
+          const builtBy = () => fs.readdirSync(path.join(kept, `v${helper.EXTRACTOR_FORMAT}`)).sort().map((entry) =>
+            `${entry.replace(/-[0-9a-f]{32}$/, '')} by ${fs.readFileSync(path.join(kept, `v${helper.EXTRACTOR_FORMAT}`, entry, 'built-by'), 'utf8').trim()}`);
+          const read = (file) => fs.readFileSync(path.join(stubs, file), 'utf8').trim().split('\n').join(' ');
+          const pathBefore = process.env.PATH;
+          process.env.PATH = `${path.join(stubs, 'bin')}${path.delimiter}${pathBefore}`;
+          try {
+            assert.strictEqual((await elaborate('o/s', shaS, 'Sample.lean')).lean, 'lean-a', 'the results name the Lean that was resolved');
+            assert.strictEqual(read('switched'), 'lean-a', "the project's code did rewrite lean-toolchain");
+            assert.deepStrictEqual(builtBy(), ['lean-a by lean-a'], 'the extractor is kept for the Lean that built it');
+            assert.strictEqual(read('used'), 'lean-a');
+            assert.deepStrictEqual(fs.readdirSync(kept), [`v${helper.EXTRACTOR_FORMAT}`], 'extractors kept the earlier way are removed');
+            // A project that asks for lean-b: its extractor is built by lean-b.
+            assert.strictEqual((await elaborate('o/t', shaT, 'Sample.lean')).lean, 'lean-b');
+            assert.deepStrictEqual(builtBy(), ['lean-a by lean-a', 'lean-b by lean-b']);
+            assert.strictEqual(read('used'), 'lean-a lean-b');
+            const stamp = JSON.parse(fs.readFileSync(path.join(kept, `v${helper.EXTRACTOR_FORMAT}`, fs.readdirSync(path.join(kept, `v${helper.EXTRACTOR_FORMAT}`)).sort()[1], 'lean-lens-extractor.json'), 'utf8'));
+            assert.strictEqual(stamp.lean, 'lean-b');
+            assert.strictEqual(stamp.toolchain, fs.realpathSync(path.join(toolchains, 'lean-b')));
+            // The same name is another Lean once its programs changed (`stable` after a release, a
+            // local build made again): it gets a new extractor. Unchanged, it uses the one it has.
+            assert.strictEqual(said.filter((line) => /Building the SubVerso extractor/.test(line)).length, 2);
+            script(path.join(toolchains, 'lean-b', 'bin', 'lake'), [...lakeLines, '# a later release']);
+            assert.strictEqual((await elaborate('o/t', shaT, 'Again.lean')).lean, 'lean-b');
+            assert.deepStrictEqual(builtBy(), ['lean-a by lean-a', 'lean-b by lean-b', 'lean-b by lean-b']);
+            assert.strictEqual(said.filter((line) => /Building the SubVerso extractor/.test(line)).length, 3);
+          } finally {
+            process.env.PATH = pathBefore;
+            h5.shutdown();
+          }
+        }
 
         // --- Lean in a codespace. The helper here hands the run to the same helper there, shows
         // its progress and keeps its results. `gh` is played by test/fixtures/fake-gh.mjs: its
