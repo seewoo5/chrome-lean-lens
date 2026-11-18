@@ -2096,6 +2096,8 @@ console.log("22. Testing real Lean data (the local helper)...");
           // An extractor kept by an earlier version of the helper, under the name alone.
           fs.mkdirSync(path.join(kept, `lean-b-${'0'.repeat(32)}-${subversoRev.slice(0, 12)}`, '.lake', 'build', 'bin'), { recursive: true });
           fs.writeFileSync(path.join(kept, `lean-b-${'0'.repeat(32)}-${subversoRev.slice(0, 12)}`, '.lake', 'build', 'bin', 'subverso-extract-mod'), 'old');
+          // (and what a helper that stopped while removing such ones left aside)
+          fs.mkdirSync(path.join(kept, '.gone-1-abc', 'lean-c-old'), { recursive: true });
           const said = [];
           const h5 = helper.createHelper({ cacheDir: cache5, cloneBase, subverso, subversoRev, sandbox: false, log: (line) => said.push(line) });
           const elaborate = async (repo, sha, file) => {

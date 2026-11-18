@@ -543,6 +543,7 @@ export function createHelper(options = {}) {
   const fileStates = new Map(); // repo@sha:path → {state: 'queued' | 'running' | 'error', error}
   const extractorBuilds = new Map(); // directory → promise of the extractor binary
   let oldExtractorsGone = false; // whether extractors kept in an earlier way were removed
+  let oldExtractorsRemoval = Promise.resolve(); // their deletion, once they were moved aside
 
   const repoDir = (repo) => path.join(buildsDir, 'repos', ...repo.split('/'));
   // Scratch folders, one per run, named after this process so that a later helper can tell
@@ -669,8 +670,9 @@ export function createHelper(options = {}) {
       const pending = [...repoQueues.values()];
       await Promise.all(pending);
       const now = [...repoQueues.values()];
-      if (now.length === pending.length && now.every((promise, i) => promise === pending[i])) return;
+      if (now.length === pending.length && now.every((promise, i) => promise === pending[i])) break;
     }
+    await oldExtractorsRemoval;
   }
 
   // --- Preparing a checkout ------------------------------------------------------------------
@@ -886,8 +888,19 @@ export function createHelper(options = {}) {
     const kept = path.join(cacheDir, 'extractors', `v${EXTRACTOR_FORMAT}`);
     if (!oldExtractorsGone) {
       // Extractors kept in an earlier way (by the project's name for its Lean alone): not used.
+      // They are moved aside at once and deleted without holding anything up (they are large);
+      // what a helper that stopped meanwhile left aside is an entry like any other, and goes
+      // the next time.
       oldExtractorsGone = true;
-      for (const entry of entries(path.dirname(kept))) if (entry !== path.basename(kept)) rmSync(path.join(path.dirname(kept), entry), GONE);
+      const old = entries(path.dirname(kept)).filter((entry) => entry !== path.basename(kept));
+      if (old.length) {
+        const aside = path.join(path.dirname(kept), `.gone-${process.pid}-${randomBytes(6).toString('hex')}`);
+        mkdirSync(aside, { recursive: true });
+        for (const entry of old) {
+          try { renameSync(path.join(path.dirname(kept), entry), path.join(aside, entry)); } catch { /* in use, or gone already: the next start tries again */ }
+        }
+        oldExtractorsRemoval = rm(aside, GONE).catch((error) => log(`Old SubVerso extractors could not be removed now (${error.code || error.message}); the next start tries again`));
+      }
     }
     const { stamp, dirName } = extractorFor(toolchain, subverso, subversoRev);
     const dir = path.join(kept, dirName);
