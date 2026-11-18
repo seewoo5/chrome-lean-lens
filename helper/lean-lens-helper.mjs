@@ -201,6 +201,13 @@ export function printable(text) {
     .replace(/\n/g, '\n    ');
 }
 
+/**
+ * Prints one line of the command's own that has names or messages in it which the helper did not
+ * write (a file's name, an error, what `gh` or elan answered): the whole line goes through
+ * `printable`, after its parts are put in, so no part is forgotten.
+ */
+const say = (line) => console.log(printable(line));
+
 // ---------------------------------------------------------------------------------------------
 // Running commands.
 
@@ -1208,25 +1215,25 @@ async function clean(values) {
       console.log(`The disk gained about ${formatBytes(result.freed)}: the copy of a linked checkout shares its space with the original.`);
     }
   }
-  if (result.toolchains.length) console.log(`Uninstalled the Lean versions the helper had installed: ${result.toolchains.join(', ')}.`);
+  if (result.toolchains.length) say(`Uninstalled the Lean versions the helper had installed: ${result.toolchains.join(', ')}.`);
   console.log(values.all ? 'The settings are kept.' : 'The settings and the results of earlier runs are kept (`clean --all` removes the results too).');
 }
 
 async function codespacesCommand(values) {
   const { createCodespaces } = await import('./codespaces.mjs');
   const { config, save } = loadConfig(path.resolve(values.cache || defaultCacheDir()));
-  const spaces = createCodespaces({ config, save, run, log: console.log, gh: values.gh });
+  const spaces = createCodespaces({ config, save, run, log: say, gh: values.gh });
   const ours = await spaces.ours();
   if (!ours.length) console.log('There are no Lean Lens codespaces.');
   for (const space of ours) {
     if (values.delete) {
       await spaces.remove(space.name);
-      console.log(`Deleted ${space.name} (${space.repository})`);
+      say(`Deleted ${space.name} (${space.repository})`);
     } else if (values.stop && space.state !== 'Shutdown') {
       await spaces.stop(space.name);
-      console.log(`Stopped ${space.name} (${space.repository})`);
+      say(`Stopped ${space.name} (${space.repository})`);
     } else {
-      console.log(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}`);
+      say(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}`);
     }
   }
 }
@@ -1295,7 +1302,7 @@ async function main() {
     let failed = helper.status(values.repo, values.sha).state === 'error';
     for (const file of paths) {
       const state = helper.fileState(values.repo, values.sha, file);
-      console.log(`${file}: ${state.state}${state.error ? ` (${printable(state.error)})` : ''}`);
+      say(`${file}: ${state.state}${state.error ? ` (${state.error})` : ''}`);
       if (state.state !== 'ready') failed = true;
     }
     if (failed) process.exitCode = 1;
@@ -1347,7 +1354,7 @@ ${helper.remote
 // path while the command line may name it through a link (`/var` on macOS is one).
 if (process.argv[1] && realOrSame(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    console.error(error.message);
+    console.error(printable(error.message));
     process.exitCode = 1;
   });
 }

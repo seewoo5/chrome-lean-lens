@@ -1838,6 +1838,19 @@ console.log("22. Testing real Lean data (the local helper)...");
           const probe = require('net').createServer();
           probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
         });
+        // `run` ends by saying how each file went, and a file's name is whatever the command was
+        // given (git allows control characters in one): the whole line is printed as plain text,
+        // the name as well as the error. Here the clone fails, so the run ends at once.
+        const oddName = 'A\u001b[2J\rToken\u202e.lean';
+        const ran = spawnSync(process.execPath, [helperFile, 'run', '--cache', path.join(root, 'cache-run'), '--no-sandbox',
+          '--clone-base', path.join(root, 'nowhere'), '--repo', 'o/r', '--sha', 'b'.repeat(40), oddName, 'B.lean'], { encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(ran.status, 1, `the run fails, and ends: ${ran.stdout}${ran.stderr}${ran.error || ''}`);
+        assert(ran.stdout.includes('\nA\\u001b[2J\\u000dToken\\u202e.lean: error ('), `the file's name is printed as plain text: ${JSON.stringify(ran.stdout)}`);
+        assert(ran.stdout.includes('\nB.lean: error ('), ran.stdout);
+        assert(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202e]/.test(ran.stdout + ran.stderr), `no control character reaches the terminal: ${JSON.stringify(ran.stdout + ran.stderr)}`);
+        // What makes the command give up is printed the same way (here, its own refusal).
+        const refused = spawnSync(process.execPath, [helperFile, '--cache', path.join(root, 'cache-run'), '--link', 'o/r\u001b[2J'], { encoding: 'utf8', timeout: 60000 });
+        assert(refused.status === 1 && refused.stderr.includes('not o/r\\u001b[2J'), JSON.stringify(refused.stderr));
         const taken = require('net').createServer();
         await new Promise((resolve) => taken.listen(0, '127.0.0.1', resolve));
         const byOther = spawnSync(process.execPath, [helperFile, '--port', String(taken.address().port), '--cache', path.join(root, 'cache-port')], { encoding: 'utf8' });
