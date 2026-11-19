@@ -2429,8 +2429,10 @@ console.log("22. Testing real Lean data (the local helper)...");
         assert.deepStrictEqual([(await settingsOf(worker)).helperToken, (await settingsOf(worker)).enableHelper], ['', false], 'nor with the private store empty');
         assert.strictEqual(recordIn(clearedIdb), undefined);
 
-        // The move is made when the store works. An update during which it fails leaves the
-        // token where it was, also through a save of the other settings, and moves it later.
+        // An update during which the private store fails: the settings are taken out of
+        // `chrome.storage.local` at once, kept where no page's script reads them (session
+        // storage, else the worker's memory), and moved from there once the store works. What
+        // a page's script plants meanwhile is not taken, nor is it by a second update.
         {
           const late = earlier();
           const lateIdb = {};
@@ -2440,14 +2442,36 @@ console.log("22. Testing real Lean data (the local helper)...");
           worker = startWorker({ local: late, idb: lateIdb, trouble: flaky, clock, session, installed: 'update' });
           const shown = await worker({ action: 'GET_SETTINGS' });
           assert.deepStrictEqual([shown.settings.helperToken, shown.helperKept], ['', 'unread']);
+          assert.deepStrictEqual(late, { lean_lens_settings: { theme: 'dark' }, cache_x: { kept: true } }, 'the token is out of chrome.storage.local at once');
           assert.strictEqual((await worker({ action: 'SET_SETTINGS', settings: { theme: 'light' } })).helperKept, undefined);
-          assert.deepStrictEqual(late.lean_lens_settings, Object.assign({ theme: 'light' }, HELPER), 'the token is not lost to that save');
+          assert.deepStrictEqual(late.lean_lens_settings, { theme: 'light' });
+          late.lean_lens_settings = Object.assign({ theme: 'light' }, planted);
+          worker = startWorker({ local: late, idb: lateIdb, trouble: flaky, clock, session, installed: 'update' });
+          assert.strictEqual((await settingsOf(worker)).helperToken, '');
+          assert.deepStrictEqual(late.lean_lens_settings, { theme: 'light' }, 'and what is planted there goes too');
           flaky.failing = false;
           clock.ahead = 60 * 1000;
           worker = startWorker({ local: late, idb: lateIdb, trouble: flaky, clock, session }); // (also after the worker restarted)
-          assert.strictEqual((await settingsOf(worker)).helperToken, 'tok');
+          assert.strictEqual((await settingsOf(worker)).helperToken, 'tok', 'the settings taken at the update are moved');
           assert.deepStrictEqual(late.lean_lens_settings, { theme: 'light' });
           assert.deepStrictEqual(recordIn(lateIdb), HELPER);
+          assert.deepStrictEqual(session, {});
+          // Without session storage they are held in the worker's memory: moved by that worker
+          // once the store works, and lost if it stops first (the token is then pasted again).
+          for (const stops of [false, true]) {
+            const bareLocal = earlier();
+            const bareIdb = {};
+            const down = { failing: true };
+            const later = { ahead: 0 };
+            worker = startWorker({ local: bareLocal, idb: bareIdb, trouble: down, clock: later, session: null, installed: 'update' });
+            assert.strictEqual((await settingsOf(worker)).helperToken, '');
+            assert.deepStrictEqual(bareLocal.lean_lens_settings, { theme: 'dark' }, 'out of chrome.storage.local at once here too');
+            down.failing = false;
+            later.ahead = 60 * 1000;
+            if (stops) worker = startWorker({ local: bareLocal, idb: bareIdb, trouble: down, clock: later, session: null });
+            assert.strictEqual((await settingsOf(worker)).helperToken, stops ? '' : 'tok');
+            assert.deepStrictEqual(recordIn(bareIdb), stops ? undefined : HELPER);
+          }
         }
 
         // A private store that never answers is given up on after a few seconds, like one that
@@ -2510,10 +2534,10 @@ console.log("22. Testing real Lean data (the local helper)...");
         }
 
         // No IndexedDB for the extension. What `chrome.storage.local` has for the helper is not
-        // used: after an update it waits there in case the store comes back, until the helper's
-        // settings are saved anew or the browser restarts; at any other time it is removed at
-        // once. What is saved is kept for the session, where content scripts cannot read, and
-        // the page is told.
+        // used, and is removed at once: after an update it is kept for the session in case the
+        // store comes back, until the helper's settings are saved anew or the browser restarts.
+        // What is saved is kept for the session, where content scripts cannot read, and the
+        // page is told.
         const bare = earlier();
         const session = {};
         worker = startWorker({ local: bare, idb: null, session, installed: 'update' });

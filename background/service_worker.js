@@ -154,7 +154,9 @@ async function clearNote(key) {
 // newest, so they come before the store's record, and are written to the store when it works
 // again.
 const UNSAVED_KEY = HELPER_SETTINGS_KEY;
-// That settings saved by an earlier version are still to be moved (see `settleEarlier`).
+// That settings saved by an earlier version are still to be moved (see `settleEarlier`):
+// 'install' or 'update' as `runtime.onInstalled` said, and then `{ values }`, the settings to
+// move, once taken from `chrome.storage.local`.
 const MOVE_KEY = 'helper_settings_move';
 
 /**
@@ -212,22 +214,28 @@ const inTurn = (work) => {
 /**
  * What to do with settings for the helper found in `chrome.storage.local` (`earlier`), where a
  * version of the extension before this one kept them, and where a page's script may be able
- * to write. They are moved to the private store only when the extension has just been updated
- * (`runtime.onInstalled`, noted under `MOVE_KEY`) and the private store has no record yet:
- * that is the one moment they can be ours. The store gets a record then, an empty one after
- * an installation, so later updates move nothing. At any other time they are never used.
+ * to write. They are taken from there only when the extension has just been updated
+ * (`runtime.onInstalled`, noted under `MOVE_KEY`): that is the one moment they can be ours.
+ * They are taken once, into the note, which no page's script can read, and then the private
+ * store gets them if it has no record yet; an installation takes an empty record. The store
+ * then has a record, so later updates move nothing. At any other time they are never used.
+ * While the store cannot be written, the note keeps them and the move is tried again; a note
+ * kept in memory goes when the worker stops, and the token is then pasted again.
  * Resolves to `{ moved, remove }`: the settings that were moved, if any, and whether those in
- * `chrome.storage.local` are to be removed now. They stay while a move is still to be made
- * (the store failed: it is tried again), and while the store is empty and nothing says an
- * update is under way (the event may be about to come).
+ * `chrome.storage.local` are to be removed now. They are, except while the store is empty and
+ * nothing says an update is under way (the event may be about to come).
  */
 async function settleEarlier(earlier) {
-  const move = await readNote(MOVE_KEY);
+  let move = await readNote(MOVE_KEY);
+  if (move && typeof move.value === 'string') {
+    await writeNote(MOVE_KEY, { values: move.value === 'update' ? earlier : {} });
+    move = noted[MOVE_KEY];
+  }
   let record;
   try {
     record = await storeRecord();
   } catch (err) {
-    return { moved: null, remove: !move };
+    return { moved: null, remove: true };
   }
   if (record.values) {
     await clearNote(MOVE_KEY);
@@ -235,13 +243,13 @@ async function settleEarlier(earlier) {
   }
   if (!move) return { moved: null, remove: false };
   try {
-    const values = move.value === 'update' ? earlier : {};
+    const { values } = move.value;
     await writeRecord(values);
     await clearNote(MOVE_KEY);
     return { moved: values, remove: true };
   } catch (err) {
     helperSaved = undefined;
-    return { moved: null, remove: false };
+    return { moved: null, remove: true };
   }
 }
 
@@ -275,11 +283,15 @@ function readSettings() {
 const getSettings = () => readSettings().then((read) => read.settings);
 
 // Installed or updated: note it, for the one move of settings an update may make (see
-// `settleEarlier`), and read the settings, which makes it.
+// `settleEarlier`), and read the settings, which makes it. Settings taken for a move not yet
+// made stay as they are: `chrome.storage.local` has none of the helper's by then.
 try {
   chrome.runtime.onInstalled.addListener((details) => {
     if (!details || (details.reason !== 'install' && details.reason !== 'update')) return;
-    inTurn(() => writeNote(MOVE_KEY, details.reason)).then(readSettings).catch(() => {});
+    inTurn(async () => {
+      const move = await readNote(MOVE_KEY);
+      if (!move || typeof move.value === 'string') await writeNote(MOVE_KEY, details.reason);
+    }).then(readSettings).catch(() => {});
   });
 } catch (err) { /* no such event here */ }
 
