@@ -1731,6 +1731,11 @@ console.log("22. Testing real Lean data (the local helper)...");
     assert(helper.isSha('1adf3d0cad950f5a9059596b4df342c38aae8353') && !helper.isSha('1adf3d0') && !helper.isSha('HEAD'));
     assert(helper.isLeanPath('A/B.lean') && helper.isLeanPath('Formal/DF_1/DF_1_2.lean'));
     for (const bad of ['../A.lean', '/abs/A.lean', 'A/../B.lean', 'A/B.txt', 'A\\B.lean', 'A//B.lean']) assert(!helper.isLeanPath(bad), `not a file path: ${bad}`);
+    // What a run prints reaches the helper's terminal only as plain text: no escape sequences,
+    // no characters that reorder a line, and no line that could pass for one of the helper's.
+    assert.strictEqual(helper.printable('error: \u001b[2J\u001b]0;x\u0007bad\r\nToken: abc\u202e'),
+      'error: \\u001b[2J\\u001b]0;x\\u0007bad\n    Token: abc\\u202e');
+    assert.strictEqual(helper.printable('ℝ → ∀ x, ⟨a, b⟩\tok'), 'ℝ → ∀ x, ⟨a, b⟩\tok');
     assert.strictEqual(helper.importsOf(['module', '', 'public import Mathlib.A', 'import all B.C -- note', '/- import Not.This -/', 'meta import D', '',
       '/-- doc: import Nope -/', 'theorem x : True := trivial', 'import Late'].join('\n')).join(' '), 'Mathlib.A B.C D');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-lens-test-'));
@@ -1843,6 +1848,19 @@ console.log("22. Testing real Lean data (the local helper)...");
           const probe = require('net').createServer();
           probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
         });
+        // `run` ends by saying how each file went, and a file's name is whatever the command was
+        // given (git allows control characters in one): the whole line is printed as plain text,
+        // the name as well as the error. Here the clone fails, so the run ends at once.
+        const oddName = 'A\u001b[2J\rToken\u202e.lean';
+        const ran = spawnSync(process.execPath, [helperFile, 'run', '--cache', path.join(root, 'cache-run'), '--no-sandbox',
+          '--clone-base', path.join(root, 'nowhere'), '--repo', 'o/r', '--sha', 'b'.repeat(40), oddName, 'B.lean'], { encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(ran.status, 1, `the run fails, and ends: ${ran.stdout}${ran.stderr}${ran.error || ''}`);
+        assert(ran.stdout.includes('\nA\\u001b[2J\\u000dToken\\u202e.lean: error ('), `the file's name is printed as plain text: ${JSON.stringify(ran.stdout)}`);
+        assert(ran.stdout.includes('\nB.lean: error ('), ran.stdout);
+        assert(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202e]/.test(ran.stdout + ran.stderr), `no control character reaches the terminal: ${JSON.stringify(ran.stdout + ran.stderr)}`);
+        // What makes the command give up is printed the same way (here, its own refusal).
+        const refused = spawnSync(process.execPath, [helperFile, '--cache', path.join(root, 'cache-run'), '--here', 'o/r\u001b[2J'], { encoding: 'utf8', timeout: 60000 });
+        assert(refused.status === 1 && refused.stderr.includes('--here takes owner/repo, not o/r\\u001b[2J'), JSON.stringify(refused.stderr));
         const taken = require('net').createServer();
         await new Promise((resolve) => taken.listen(0, '127.0.0.1', resolve));
         const byOther = spawnSync(process.execPath, [helperFile, '--port', String(taken.address().port), '--cache', path.join(root, 'cache-port')], { encoding: 'utf8' });

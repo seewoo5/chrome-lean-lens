@@ -190,6 +190,29 @@ function alive(pid) {
   }
 }
 
+/**
+ * Text from a run (what lake and Lean print, a codespace's messages) made safe to print in the
+ * terminal the helper runs in. A project's code writes that text, and the helper's own lines,
+ * the token among them, are printed there too. So control characters, which could move the
+ * cursor, rewrite earlier lines or change the terminal's settings, and the characters that
+ * reorder text, are shown as `\u…` escapes; and every line after the first is indented, so none
+ * passes for a line of the helper's own.
+ */
+export function printable(text) {
+  return String(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+      (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/\n/g, '\n    ');
+}
+
+/**
+ * Prints one line of the command's own that has names or messages in it which the helper did not
+ * write (a file's name, an error, what `gh` or elan answered): the whole line goes through
+ * `printable`, after its parts are put in, so no part is forgotten.
+ */
+const say = (line) => console.log(printable(line));
+
 // ---------------------------------------------------------------------------------------------
 // Running commands.
 
@@ -479,7 +502,8 @@ export function createHelper(options = {}) {
   // In the cache folder unless another place suits it better (a codespace's temporary disk).
   const buildsDir = path.resolve(options.buildsDir || cacheDir);
   const { config, save } = loadConfig(cacheDir);
-  const log = options.log || ((message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${message}`));
+  const print = options.log || ((message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${message}`));
+  const log = (message) => print(printable(message));
   const poolSize = Math.max(1, Number(options.jobs) || Math.min(4, Math.ceil(availableParallelism() / 2)));
   const subverso = options.subverso || DEFAULT_SUBVERSO;
   const subversoRev = options.subversoRev || DEFAULT_SUBVERSO_REV;
@@ -1215,7 +1239,7 @@ async function clean(values) {
       console.log(`The disk gained about ${formatBytes(result.freed)}: the copy of a linked checkout shares its space with the original.`);
     }
   }
-  if (result.toolchains.length) console.log(`Uninstalled the Lean versions the helper had installed: ${result.toolchains.join(', ')}.`);
+  if (result.toolchains.length) say(`Uninstalled the Lean versions the helper had installed: ${result.toolchains.join(', ')}.`);
   console.log(values.all ? 'The settings are kept.' : 'The settings and the results of earlier runs are kept (`clean --all` removes the results too).');
 }
 
@@ -1223,21 +1247,21 @@ async function codespacesCommand(values) {
   const { createCodespaces } = await import('./codespaces.mjs');
   const cacheDir = path.resolve(values.cache || defaultCacheDir());
   const { config, save } = loadConfig(cacheDir);
-  const spaces = createCodespaces({ config, save, run, log: console.log, gh: values.gh, recordsDir: path.join(cacheDir, 'codespaces') });
+  const spaces = createCodespaces({ config, save, run, log: say, gh: values.gh, recordsDir: path.join(cacheDir, 'codespaces') });
   const ours = await spaces.ours();
   if (!ours.length) console.log("There are no codespaces that this helper's settings name.");
   for (const space of ours) {
     if (space.busy && (values.delete || values.stop)) {
       // (Made for a run without a sandbox by a helper that is still running: it deletes it itself.)
-      console.log(`Left alone: ${space.name} (${space.repository}) is in use by a running helper (process ${space.busy})`);
+      say(`Left alone: ${space.name} (${space.repository}) is in use by a running helper (process ${space.busy})`);
     } else if (values.delete) {
       await spaces.remove(space.name);
-      console.log(`Deleted ${space.name} (${space.repository})`);
+      say(`Deleted ${space.name} (${space.repository})`);
     } else if (values.stop && space.state !== 'Shutdown') {
       await spaces.stop(space.name);
-      console.log(`Stopped ${space.name} (${space.repository})`);
+      say(`Stopped ${space.name} (${space.repository})`);
     } else {
-      console.log(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}${space.busy ? `  (in use by a running helper, process ${space.busy})` : ''}`);
+      say(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}${space.busy ? `  (in use by a running helper, process ${space.busy})` : ''}`);
     }
   }
 }
@@ -1308,7 +1332,7 @@ async function main() {
     let failed = helper.status(values.repo, values.sha).state === 'error';
     for (const file of paths) {
       const state = helper.fileState(values.repo, values.sha, file);
-      console.log(`${file}: ${state.state}${state.error ? ` (${state.error})` : ''}`);
+      say(`${file}: ${state.state}${state.error ? ` (${state.error})` : ''}`);
       if (state.state !== 'ready') failed = true;
     }
     if (failed) process.exitCode = 1;
@@ -1363,7 +1387,7 @@ ${helper.remote
 // path while the command line may name it through a link (`/var` on macOS is one).
 if (process.argv[1] && realOrSame(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    console.error(error.message);
+    console.error(printable(error.message));
     process.exitCode = 1;
   });
 }
