@@ -131,10 +131,16 @@ Running Lean on a pull request runs that pull request's code: Lean executes code
 
 - **Lean never starts on its own.** It runs when you press **Run Lean**, and only on repositories you have allowed.
 - **The helper answers only the extension.** It listens on `127.0.0.1` and requires its token.
-- **The code runs in a sandbox**, on macOS (`sandbox-exec`) and on Linux ([bubblewrap](https://github.com/containers/bubblewrap), which a codespace has). It has no network except while fetching the project's dependencies, cannot read or change your files, and gets none of your environment.
-- **In a codespace** the sandbox also keeps the code away from the codespace's GitHub token. Without a working sandbox, a run on a repository you can push to is refused.
+- **The code runs in a sandbox**, on macOS (`sandbox-exec`) and on Linux ([bubblewrap](https://github.com/containers/bubblewrap), which a codespace has). It has no network except while fetching the project's dependencies, cannot read or change your files, and gets none of your environment. Where there is no working sandbox (on Linux, when bubblewrap is missing or may not run), Lean does not run.
+- **In a codespace** the sandbox also keeps the code away from the codespace's GitHub token. Without a working sandbox nothing runs there either.
 
-The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` turns it off, which a project with private dependencies needs.
+The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` turns it off, which a project with private dependencies needs. Lean then runs with your permissions.
+
+Worth knowing about what you allow:
+
+- **Allowing a repository allows every pull request to it**, from forks too. What runs is the code of the pull request's author, not of the repository's owners.
+- **The click on Run Lean is checked in the GitHub tab.** A GitHub page that was itself taken over could allow a repository and start a run without one.
+- **A project chooses its Lean.** Its `lean-toolchain` may name a release from any GitHub repository; the helper installs that with elan, and the project's code runs with it.
 
 ### Good to know
 
@@ -157,7 +163,7 @@ The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` tu
 | `--keep-codespaces` | Leave codespaces running when idle and when the helper stops |
 | `--tidy-after MINUTES` | How long an unused build or codespace stays (default 30) |
 | `--port N` | Listen on another port (default 5326) |
-| `--no-sandbox` | Run a project's code without the sandbox |
+| `--no-sandbox` | Run a project's code without the sandbox, with your permissions (without this, no sandbox means no run) |
 
 `node helper/lean-lens-helper.mjs --help` lists the rest. The helper can also elaborate files without the extension:
 

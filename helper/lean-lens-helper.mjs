@@ -50,13 +50,18 @@ const MATHLIB_ROOM_BYTES = 12e9;
 // ---------------------------------------------------------------------------------------------
 // Checks on what a request names. Everything here ends up in a path or a command's arguments.
 
+// A name may start with a dot (`owner/.github`), but may not be just one: `owner/.` would make
+// the copy's folder the owner's folder, which holds the copies of all the owner's repositories.
 export const isRepo = (value) => typeof value === 'string' && value.length < 200 &&
-  /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*$/.test(value) && !value.includes('..');
+  /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*$/.test(value) && !value.includes('..') && !value.endsWith('/.');
 export const isSha = (value) => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
 export const isLeanPath = (value) => typeof value === 'string' && value.length < 512 && value.endsWith('.lean') &&
   !value.includes('\\') && !value.includes('\0') && value.split('/').every((part) => part && part !== '.' && part !== '..');
 
 export const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+
+const NO_SANDBOX = "This system has no working sandbox for a project's code, so Lean is not run: it would run with your permissions. "
+  + 'On Linux, install bubblewrap (bwrap) and check it may run here. Starting the helper with --no-sandbox runs Lean all the same.';
 
 /** Modules a Lean file imports, read from its header only (so `import` in a comment or string is not one). */
 export function importsOf(source) {
@@ -235,6 +240,29 @@ function alive(pid) {
     return error.code === 'EPERM'; // it exists, and belongs to someone else
   }
 }
+
+/**
+ * Text from a run (what lake and Lean print, a codespace's messages) made safe to print in the
+ * terminal the helper runs in. A project's code writes that text, and the helper's own lines,
+ * the token among them, are printed there too. So control characters, which could move the
+ * cursor, rewrite earlier lines or change the terminal's settings, and the characters that
+ * reorder text, are shown as `\u…` escapes; and every line after the first is indented, so none
+ * passes for a line of the helper's own.
+ */
+export function printable(text) {
+  return String(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+      (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .replace(/\n/g, '\n    ');
+}
+
+/**
+ * Prints one line of the command's own that has names or messages in it which the helper did not
+ * write (a file's name, an error, what `gh` or elan answered): the whole line goes through
+ * `printable`, after its parts are put in, so no part is forgotten.
+ */
+const say = (line) => console.log(printable(line));
 
 // ---------------------------------------------------------------------------------------------
 // Running commands.
@@ -515,7 +543,8 @@ export async function cleanCache(cacheDir, { results = false, force = false, bui
 
 /**
  * @param {object} options `{cacheDir, buildsDir, jobs, subverso, subversoRev, cloneBase, sandbox,
- *   keepBuilds, tidyMinutes, log}`
+ *   keepBuilds, tidyMinutes, log}`; and `detectSandbox`, which stands in for the check of what
+ *   this system can confine a command with (the tests give its answer).
  * @returns `{config, allow, link, start, status, fileState, readData, handle, sandbox, idle, shutdown}`
  */
 export function createHelper(options = {}) {
@@ -524,7 +553,8 @@ export function createHelper(options = {}) {
   // In the cache folder unless another place suits it better (a codespace's temporary disk).
   const buildsDir = path.resolve(options.buildsDir || cacheDir);
   const { config, save } = loadConfig(cacheDir);
-  const log = options.log || ((message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${message}`));
+  const print = options.log || ((message) => console.log(`[${new Date().toTimeString().slice(0, 8)}] ${message}`));
+  const log = (message) => print(printable(message));
   const poolSize = Math.max(1, Number(options.jobs) || Math.min(4, Math.ceil(availableParallelism() / 2)));
   const subverso = options.subverso || DEFAULT_SUBVERSO;
   const subversoRev = options.subversoRev || DEFAULT_SUBVERSO_REV;
@@ -532,11 +562,18 @@ export function createHelper(options = {}) {
   const keepBuilds = Boolean(options.keepBuilds);
   const tidyMinutes = options.tidyMinutes === undefined ? DEFAULT_TIDY_MINUTES : Number(options.tidyMinutes);
   if (!Number.isFinite(tidyMinutes) || tidyMinutes < 0) throw new Error('The time to keep a build is a number of minutes, 0 or more');
-  // 'seatbelt' when commands can be confined, 'none' when this system can't, 'off' when asked not to.
+  // 'seatbelt' or 'bwrap' when commands can be confined, 'none' when this system can't (then
+  // nothing of a project is run), 'off' when asked not to.
   const sandboxWanted = options.sandbox !== false;
   let sandboxState = sandboxWanted ? 'checking' : 'off';
   const sandboxKind = sandboxWanted
-    ? detectSandbox().then((found) => { sandboxState = found || 'none'; return found; })
+    ? Promise.resolve().then(() => (options.detectSandbox || detectSandbox)()).catch(() => null).then((answer) => {
+      // Anything but a sandbox `untrusted` knows how to use is no sandbox, and so is a check
+      // that failed.
+      const found = answer === 'seatbelt' || answer === 'bwrap' ? answer : null;
+      sandboxState = found || 'none';
+      return found;
+    })
     : Promise.resolve(null);
 
   // Lean in codespaces instead of here (see codespaces.mjs, whose `createCodespaces` is passed in).
@@ -788,8 +825,11 @@ export function createHelper(options = {}) {
       GIT_TERMINAL_PROMPT: '0',
       ...extra,
     };
+    // No sandbox on this system (on Linux, bubblewrap missing or not allowed to run): the code
+    // would run with the reader's own permissions, so it does not run, unless they asked for
+    // that (`--no-sandbox`, above).
     const confinement = await sandboxKind;
-    if (!confinement) return run(command, args, { cwd, env, onLine, timeoutMs });
+    if (!confinement) throw new Error(NO_SANDBOX);
     const allowed = [home, temporary, ...writable].map(realOrSame);
     const limits = {
       network,
@@ -1042,6 +1082,9 @@ export function createHelper(options = {}) {
       for (const [rootDir, files] of groups) {
         const root = path.join(job.dir, rootDir);
         job.phase = 'preparing';
+        // Refused before anything is installed for it (a Lean version is some 3 GB), not at the
+        // first command that would run the project's code.
+        if (sandboxWanted && !(await sandboxKind)) throw new Error(NO_SANDBOX);
         const toolchain = await resolveToolchain(root, job);
         await ensureDependencies(root, rootDir, toolchain, job, workDir);
         await buildImports(root, files.map((file) => file.path), toolchain, job, scratch);
@@ -1158,11 +1201,12 @@ export function createHelper(options = {}) {
     return json(404, { error: 'Unknown request' });
   }
 
-  /** How a project's code is confined: 'seatbelt', 'none' (this system can't) or 'off'. */
+  /** How a project's code is confined: 'seatbelt' or 'bwrap', 'none' (this system can't) or 'off'. */
   const sandbox = () => sandboxKind.then(() => sandboxState);
 
   sweep();
-  return { cacheDir, buildsDir, config, allow, link, start, status, fileState, readData, handle, poolSize, sandbox, keepBuilds, keepCodespaces, tidyMinutes, remote, idle, shutdown };
+  // (`untrusted` is here for the tests: they check that it runs nothing without a sandbox.)
+  return { cacheDir, buildsDir, config, allow, link, start, status, fileState, readData, handle, poolSize, sandbox, keepBuilds, keepCodespaces, tidyMinutes, remote, idle, shutdown, untrusted };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1228,10 +1272,12 @@ export function serve(helper, port = DEFAULT_PORT) {
       }
     });
   });
-  return new Promise((resolve, reject) => {
+  // It answers once it knows whether this system has a sandbox: until then `/status` would say
+  // 'checking', which is neither the one nor the other to whoever asks.
+  return helper.sandbox().then(() => new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => resolve(server));
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1275,6 +1321,7 @@ Options
   --subverso-rev REV        SubVerso revision to build
   --clone-base URL          where repositories are cloned from (default ${DEFAULT_CLONE_BASE})
   --no-sandbox              run a project's code with your own permissions and environment
+                            (without this, no working sandbox means no run)
 `;
 
 async function clean(values) {
@@ -1287,25 +1334,25 @@ async function clean(values) {
       console.log(`The disk gained about ${formatBytes(result.freed)}: the copy of a linked checkout shares its space with the original.`);
     }
   }
-  if (result.toolchains.length) console.log(`Uninstalled the Lean versions the helper had installed: ${result.toolchains.join(', ')}.`);
+  if (result.toolchains.length) say(`Uninstalled the Lean versions the helper had installed: ${result.toolchains.join(', ')}.`);
   console.log(values.all ? 'The settings are kept.' : 'The settings and the results of earlier runs are kept (`clean --all` removes the results too).');
 }
 
 async function codespacesCommand(values) {
   const { createCodespaces } = await import('./codespaces.mjs');
   const { config, save } = loadConfig(path.resolve(values.cache || defaultCacheDir()));
-  const spaces = createCodespaces({ config, save, run, log: console.log, gh: values.gh });
+  const spaces = createCodespaces({ config, save, run, log: say, gh: values.gh });
   const ours = await spaces.ours();
   if (!ours.length) console.log('There are no Lean Lens codespaces.');
   for (const space of ours) {
     if (values.delete) {
       await spaces.remove(space.name);
-      console.log(`Deleted ${space.name} (${space.repository})`);
+      say(`Deleted ${space.name} (${space.repository})`);
     } else if (values.stop && space.state !== 'Shutdown') {
       await spaces.stop(space.name);
-      console.log(`Stopped ${space.name} (${space.repository})`);
+      say(`Stopped ${space.name} (${space.repository})`);
     } else {
-      console.log(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}`);
+      say(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}`);
     }
   }
 }
@@ -1347,7 +1394,7 @@ async function main() {
     : `Sandbox ${{
       seatbelt: "on: the project's code runs without network access and cannot read or change your files",
       bwrap: "on: the project's code runs without network access and sees none of your files",
-      none: 'not available on this system: Lean runs with your permissions',
+      none: 'not available on this system, so Lean will not run (on Linux, install bubblewrap; or start with --no-sandbox to run Lean with your permissions)',
       off: 'off (--no-sandbox): Lean runs with your permissions',
     }[await helper.sandbox()]}`;
   for (const entry of values.link || []) {
@@ -1374,7 +1421,7 @@ async function main() {
     let failed = helper.status(values.repo, values.sha).state === 'error';
     for (const file of paths) {
       const state = helper.fileState(values.repo, values.sha, file);
-      console.log(`${file}: ${state.state}${state.error ? ` (${state.error})` : ''}`);
+      say(`${file}: ${state.state}${state.error ? ` (${state.error})` : ''}`);
       if (state.state !== 'ready') failed = true;
     }
     if (failed) process.exitCode = 1;
@@ -1426,7 +1473,7 @@ ${helper.remote
 // path while the command line may name it through a link (`/var` on macOS is one).
 if (process.argv[1] && realOrSame(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    console.error(error.message);
+    console.error(printable(error.message));
     process.exitCode = 1;
   });
 }

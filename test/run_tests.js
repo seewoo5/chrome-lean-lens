@@ -798,6 +798,16 @@ const fakeFiles = {
   "RogersRamanujan/C.lean": "def c_def : ℕ := 0"
 };
 const realGetFileText = context.getFileText;
+// The parts of a file's URL come from the page: each stays one part, and none can lead elsewhere.
+assert.strictEqual(context.githubPath('o', 'r', 'main', 'A', 'B ?#%.lean'), 'o/r/main/A/B%20%3F%23%25.lean');
+assert.strictEqual(context.githubPath('..%2F', 'x/y'), '..%252F/x%2Fy');
+for (const bad of [['o', '..'], ['o', '.'], ['o', ''], ['o', null]]) assert.strictEqual(context.githubPath(...bad), null, `refused: ${bad}`);
+asyncChecks.push(Promise.all([
+  realGetFileText({ owner: 'o', repo: 'r', sha: '..', side: 'right', path: '../../settings/x.lean' }),
+  realGetFileText({ owner: 'o', repo: 'r', sha: 'abc', side: 'right', path: 'A/../../../settings.lean' }),
+  realGetFileText({ owner: '..', repo: 'r', sha: 'abc', side: 'right', path: 'A.lean' }),
+  context.getPrRevision('o', 'r', '1/../../x'),
+]).then(answers => assert.deepStrictEqual(answers, [null, null, null, null], 'a page cannot point the worker at other URLs')));
 const fetched = [];
 context.getFileText = async (ref) => { fetched.push(ref.path); return fakeFiles[ref.path] || null; };
 asyncChecks.push(context.projectDeclarations({ owner: "AxiomMath", repo: "RogersRamanujan", sha: "abc", paths: ["RogersRamanujan/A.lean"] }).then(ds => {
@@ -1716,11 +1726,16 @@ console.log("22. Testing real Lean data (the local helper)...");
     assert.throws(() => convertModule(blocks, '#doc (Manual) "T" =>\n\n:::group "g"\nProse.\n:::\nmore'), /covers/);
 
     // --- The helper: what it accepts, and what it answers without running anything.
-    assert(helper.isRepo('seewoo5/DifferentProofs') && helper.isRepo('leanprover-community/mathlib4'));
-    for (const bad of ['../x', 'a/b/c', 'a/..', 'a', '-a/b', 'a/b c']) assert(!helper.isRepo(bad), `not a repository: ${bad}`);
+    assert(helper.isRepo('seewoo5/DifferentProofs') && helper.isRepo('leanprover-community/mathlib4') && helper.isRepo('o/.github'));
+    for (const bad of ['../x', 'a/b/c', 'a/..', 'a/.', 'a', '-a/b', 'a/b c']) assert(!helper.isRepo(bad), `not a repository: ${bad}`);
     assert(helper.isSha('1adf3d0cad950f5a9059596b4df342c38aae8353') && !helper.isSha('1adf3d0') && !helper.isSha('HEAD'));
     assert(helper.isLeanPath('A/B.lean') && helper.isLeanPath('Formal/DF_1/DF_1_2.lean'));
     for (const bad of ['../A.lean', '/abs/A.lean', 'A/../B.lean', 'A/B.txt', 'A\\B.lean', 'A//B.lean']) assert(!helper.isLeanPath(bad), `not a file path: ${bad}`);
+    // What a run prints reaches the helper's terminal only as plain text: no escape sequences,
+    // no characters that reorder a line, and no line that could pass for one of the helper's.
+    assert.strictEqual(helper.printable('error: \u001b[2J\u001b]0;x\u0007bad\r\nToken: abc\u202e'),
+      'error: \\u001b[2J\\u001b]0;x\\u0007bad\n    Token: abc\\u202e');
+    assert.strictEqual(helper.printable('ℝ → ∀ x, ⟨a, b⟩\tok'), 'ℝ → ∀ x, ⟨a, b⟩\tok');
     assert.strictEqual(helper.importsOf(['module', '', 'public import Mathlib.A', 'import all B.C -- note', '/- import Not.This -/', 'meta import D', '',
       '/-- doc: import Nope -/', 'theorem x : True := trivial', 'import Late'].join('\n')).join(' '), 'Mathlib.A B.C D');
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lean-lens-test-'));
@@ -1833,6 +1848,19 @@ console.log("22. Testing real Lean data (the local helper)...");
           const probe = require('net').createServer();
           probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
         });
+        // `run` ends by saying how each file went, and a file's name is whatever the command was
+        // given (git allows control characters in one): the whole line is printed as plain text,
+        // the name as well as the error. Here the clone fails, so the run ends at once.
+        const oddName = 'A\u001b[2J\rToken\u202e.lean';
+        const ran = spawnSync(process.execPath, [helperFile, 'run', '--cache', path.join(root, 'cache-run'), '--no-sandbox',
+          '--clone-base', path.join(root, 'nowhere'), '--repo', 'o/r', '--sha', 'b'.repeat(40), oddName, 'B.lean'], { encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(ran.status, 1, `the run fails, and ends: ${ran.stdout}${ran.stderr}${ran.error || ''}`);
+        assert(ran.stdout.includes('\nA\\u001b[2J\\u000dToken\\u202e.lean: error ('), `the file's name is printed as plain text: ${JSON.stringify(ran.stdout)}`);
+        assert(ran.stdout.includes('\nB.lean: error ('), ran.stdout);
+        assert(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202e]/.test(ran.stdout + ran.stderr), `no control character reaches the terminal: ${JSON.stringify(ran.stdout + ran.stderr)}`);
+        // What makes the command give up is printed the same way (here, its own refusal).
+        const refused = spawnSync(process.execPath, [helperFile, '--cache', path.join(root, 'cache-run'), '--here', 'o/r\u001b[2J'], { encoding: 'utf8', timeout: 60000 });
+        assert(refused.status === 1 && refused.stderr.includes('--here takes owner/repo, not o/r\\u001b[2J'), JSON.stringify(refused.stderr));
         const taken = require('net').createServer();
         await new Promise((resolve) => taken.listen(0, '127.0.0.1', resolve));
         const byOther = spawnSync(process.execPath, [helperFile, '--port', String(taken.address().port), '--cache', path.join(root, 'cache-port')], { encoding: 'utf8' });
@@ -2169,6 +2197,82 @@ console.log("22. Testing real Lean data (the local helper)...");
             process.env.PATH = pathBefore;
             h5.shutdown();
           }
+        }
+
+        // No working sandbox on this system (the check's answer is given here, since the machine
+        // the tests run on usually has one): a project's code is not run, and nothing is looked
+        // up or installed for it. `elan` and `lake` are stand-ins that note each call.
+        const lakeOrigin = path.join(root, 'lake-origin');
+        fs.mkdirSync(lakeOrigin);
+        git(lakeOrigin, 'init', '--quiet');
+        fs.writeFileSync(path.join(lakeOrigin, 'lakefile.toml'), 'name = "p"\n');
+        fs.writeFileSync(path.join(lakeOrigin, 'lean-toolchain'), 'leanprover/lean4:v4.0.0\n');
+        fs.writeFileSync(path.join(lakeOrigin, 'P.lean'), 'def p := 1\n');
+        git(lakeOrigin, 'add', '.');
+        git(lakeOrigin, 'commit', '--quiet', '-m', 'a Lake project');
+        const lakeCommit = git(lakeOrigin, 'rev-parse', 'HEAD');
+        git(root, 'clone', '--quiet', '--bare', lakeOrigin, path.join(root, 'remotes', 'o', 'p.git'));
+        const stubBin = path.join(root, 'stub-bin');
+        const stubCalls = path.join(root, 'stub-calls');
+        fs.mkdirSync(stubBin);
+        fs.writeFileSync(path.join(stubBin, 'lake'), `#!/bin/sh\necho "lake $*" >> '${stubCalls}'\nexit 1\n`, { mode: 0o755 });
+        fs.writeFileSync(path.join(stubBin, 'elan'), `#!/bin/sh\necho "elan $*" >> '${stubCalls}'\ncase "$1" in toolchain) echo leanprover/lean4:v4.0.0 ;; which) echo '${path.join(stubBin, 'lake')}' ;; esac\n`, { mode: 0o755 });
+        const pathBefore = process.env.PATH;
+        process.env.PATH = `${stubBin}${path.delimiter}${pathBefore}`;
+        try {
+          const lakeRun = async (options) => {
+            const made = helper.createHelper(Object.assign({ cacheDir: path.join(root, 'cache-lake'), cloneBase, tidyMinutes: 0, log: () => {} }, options));
+            made.allow('o/p');
+            made.start({ repo: 'o/p', sha: lakeCommit, pr: null, paths: ['P.lean'] });
+            while (made.status('o/p', lakeCommit).state === 'pending') await tick(20);
+            await made.idle();
+            const status = made.status('o/p', lakeCommit);
+            const reported = JSON.parse(made.handle('GET', '/status').body).sandbox;
+            made.shutdown();
+            return { status, reported, calls: fs.existsSync(stubCalls) ? fs.readFileSync(stubCalls, 'utf8') : '' };
+          };
+          for (const answer of [null, undefined, false, 'none', 'another-kind']) {
+            const refused = await lakeRun({ detectSandbox: async () => answer });
+            assert.strictEqual(refused.reported, 'none', `the check said ${answer}`);
+            assert.strictEqual(refused.status.state, 'error');
+            assert(/no working sandbox.*Lean is not run.*--no-sandbox/.test(refused.status.error), refused.status.error);
+            assert.strictEqual(refused.calls, '', 'refused before the Lean version is looked up, and before `lake` runs');
+          }
+          // A check that fails altogether is no sandbox either.
+          const broken = await lakeRun({ detectSandbox: () => Promise.reject(new Error('the check broke')) });
+          assert.strictEqual(broken.reported, 'none');
+          assert(/no working sandbox/.test(broken.status.error), broken.status.error);
+          assert.strictEqual(broken.calls, '');
+          // The one function that runs a project's command refuses by itself as well, whoever
+          // calls it and whatever was checked before.
+          const direct = helper.createHelper({ cacheDir: path.join(root, 'cache-lake'), log: () => {}, detectSandbox: async () => null });
+          await assert.rejects(direct.untrusted(path.join(stubBin, 'lake'), ['env', 'true'], { scratch: path.join(root, 'scratch-direct') }), /no working sandbox.*Lean is not run/);
+          assert(!fs.existsSync(stubCalls), 'the command was not run');
+          direct.shutdown();
+          // Until the check has answered, the helper says so to one who asks it directly, and
+          // does not answer over its port: what is read there is the check's answer.
+          const slow = helper.createHelper({ cacheDir: path.join(root, 'cache-lake'), log: () => {}, detectSandbox: () => new Promise((resolve) => setTimeout(() => resolve(null), 300)) });
+          assert.strictEqual(JSON.parse(slow.handle('GET', '/status').body).sandbox, 'checking');
+          const statusPort = await new Promise((resolve) => {
+            const probe = require('net').createServer();
+            probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
+          });
+          const listening = await helper.serve(slow, statusPort);
+          try {
+            const answer = await fetch(`http://127.0.0.1:${statusPort}/status`, { headers: { 'X-Lean-Lens-Token': slow.config.token } });
+            assert.strictEqual((await answer.json()).sandbox, 'none', 'over its port, never "checking"');
+          } finally {
+            listening.close();
+            slow.shutdown();
+          }
+          assert(fs.readFileSync(path.join(__dirname, '..', 'options', 'options.js'), 'utf8').includes("details.sandbox === 'checking'"), 'the options page has words for a check still under way');
+          // --no-sandbox: the reader asked for it, so the project's `lake` runs (here it fails).
+          const asked = await lakeRun({ sandbox: false, detectSandbox: async () => null });
+          assert.strictEqual(asked.reported, 'off');
+          assert(asked.calls.includes('elan which lake') && asked.calls.includes('lake env true'), asked.calls);
+          assert(!/no working sandbox/.test(asked.status.error || ''), asked.status.error);
+        } finally {
+          process.env.PATH = pathBefore;
         }
 
         // --- Lean in a codespace. The helper here hands the run to the same helper there, shows
