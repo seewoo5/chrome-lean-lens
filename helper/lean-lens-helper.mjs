@@ -60,7 +60,7 @@ export const isLeanPath = (value) => typeof value === 'string' && value.length <
 
 export const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
-const NO_SANDBOX = "This system has no sandbox for a project's code, so Lean is not run: it would run with your permissions. "
+const NO_SANDBOX = "This system has no working sandbox for a project's code, so Lean is not run: it would run with your permissions. "
   + 'On Linux, install bubblewrap (bwrap) and check it may run here. Starting the helper with --no-sandbox runs Lean all the same.';
 
 /** Modules a Lean file imports, read from its header only (so `import` in a comment or string is not one). */
@@ -469,7 +469,8 @@ export async function cleanCache(cacheDir, { results = false, force = false, bui
 
 /**
  * @param {object} options `{cacheDir, buildsDir, jobs, subverso, subversoRev, cloneBase, sandbox,
- *   keepBuilds, tidyMinutes, log}`
+ *   keepBuilds, tidyMinutes, log}`; and `detectSandbox`, which stands in for the check of what
+ *   this system can confine a command with (the tests give its answer).
  * @returns `{config, allow, link, start, status, fileState, readData, handle, sandbox, idle, shutdown}`
  */
 export function createHelper(options = {}) {
@@ -486,11 +487,18 @@ export function createHelper(options = {}) {
   const keepBuilds = Boolean(options.keepBuilds);
   const tidyMinutes = options.tidyMinutes === undefined ? DEFAULT_TIDY_MINUTES : Number(options.tidyMinutes);
   if (!Number.isFinite(tidyMinutes) || tidyMinutes < 0) throw new Error('The time to keep a build is a number of minutes, 0 or more');
-  // 'seatbelt' when commands can be confined, 'none' when this system can't, 'off' when asked not to.
+  // 'seatbelt' or 'bwrap' when commands can be confined, 'none' when this system can't (then
+  // nothing of a project is run), 'off' when asked not to.
   const sandboxWanted = options.sandbox !== false;
   let sandboxState = sandboxWanted ? 'checking' : 'off';
   const sandboxKind = sandboxWanted
-    ? detectSandbox().then((found) => { sandboxState = found || 'none'; return found; })
+    ? Promise.resolve().then(() => (options.detectSandbox || detectSandbox)()).catch(() => null).then((answer) => {
+      // Anything but a sandbox `untrusted` knows how to use is no sandbox, and so is a check
+      // that failed.
+      const found = answer === 'seatbelt' || answer === 'bwrap' ? answer : null;
+      sandboxState = found || 'none';
+      return found;
+    })
     : Promise.resolve(null);
 
   // Lean in codespaces instead of here (see codespaces.mjs, whose `createCodespaces` is passed in).
@@ -1073,11 +1081,12 @@ export function createHelper(options = {}) {
     return json(404, { error: 'Unknown request' });
   }
 
-  /** How a project's code is confined: 'seatbelt', 'none' (this system can't) or 'off'. */
+  /** How a project's code is confined: 'seatbelt' or 'bwrap', 'none' (this system can't) or 'off'. */
   const sandbox = () => sandboxKind.then(() => sandboxState);
 
   sweep();
-  return { cacheDir, buildsDir, config, allow, link, start, status, fileState, readData, handle, poolSize, sandbox, keepBuilds, keepCodespaces, tidyMinutes, remote, idle, shutdown };
+  // (`untrusted` is here for the tests: they check that it runs nothing without a sandbox.)
+  return { cacheDir, buildsDir, config, allow, link, start, status, fileState, readData, handle, poolSize, sandbox, keepBuilds, keepCodespaces, tidyMinutes, remote, idle, shutdown, untrusted };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1143,10 +1152,12 @@ export function serve(helper, port = DEFAULT_PORT) {
       }
     });
   });
-  return new Promise((resolve, reject) => {
+  // It answers once it knows whether this system has a sandbox: until then `/status` would say
+  // 'checking', which is neither the one nor the other to whoever asks.
+  return helper.sandbox().then(() => new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => resolve(server));
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1190,6 +1201,7 @@ Options
   --subverso-rev REV        SubVerso revision to build
   --clone-base URL          where repositories are cloned from (default ${DEFAULT_CLONE_BASE})
   --no-sandbox              run a project's code with your own permissions and environment
+                            (without this, no working sandbox means no run)
 `;
 
 async function clean(values) {
@@ -1262,7 +1274,7 @@ async function main() {
     : `Sandbox ${{
       seatbelt: "on: the project's code runs without network access and cannot read or change your files",
       bwrap: "on: the project's code runs without network access and sees none of your files",
-      none: 'not available on this system, so Lean will not run (install bubblewrap, or start with --no-sandbox to run it with your permissions)',
+      none: 'not available on this system, so Lean will not run (on Linux, install bubblewrap; or start with --no-sandbox to run Lean with your permissions)',
       off: 'off (--no-sandbox): Lean runs with your permissions',
     }[await helper.sandbox()]}`;
   for (const entry of values.link || []) {

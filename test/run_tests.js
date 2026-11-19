@@ -2034,6 +2034,82 @@ console.log("22. Testing real Lean data (the local helper)...");
         assert.strictEqual(fs.readFileSync(path.join(theirs, 'mine.txt'), 'utf8'), 'mine');
         assert(!fs.existsSync(path.join(theirs, 'A.lean')), 'nothing was checked out through the link');
 
+        // No working sandbox on this system (the check's answer is given here, since the machine
+        // the tests run on usually has one): a project's code is not run, and nothing is looked
+        // up or installed for it. `elan` and `lake` are stand-ins that note each call.
+        const lakeOrigin = path.join(root, 'lake-origin');
+        fs.mkdirSync(lakeOrigin);
+        git(lakeOrigin, 'init', '--quiet');
+        fs.writeFileSync(path.join(lakeOrigin, 'lakefile.toml'), 'name = "p"\n');
+        fs.writeFileSync(path.join(lakeOrigin, 'lean-toolchain'), 'leanprover/lean4:v4.0.0\n');
+        fs.writeFileSync(path.join(lakeOrigin, 'P.lean'), 'def p := 1\n');
+        git(lakeOrigin, 'add', '.');
+        git(lakeOrigin, 'commit', '--quiet', '-m', 'a Lake project');
+        const lakeCommit = git(lakeOrigin, 'rev-parse', 'HEAD');
+        git(root, 'clone', '--quiet', '--bare', lakeOrigin, path.join(root, 'remotes', 'o', 'p.git'));
+        const stubBin = path.join(root, 'stub-bin');
+        const stubCalls = path.join(root, 'stub-calls');
+        fs.mkdirSync(stubBin);
+        fs.writeFileSync(path.join(stubBin, 'lake'), `#!/bin/sh\necho "lake $*" >> '${stubCalls}'\nexit 1\n`, { mode: 0o755 });
+        fs.writeFileSync(path.join(stubBin, 'elan'), `#!/bin/sh\necho "elan $*" >> '${stubCalls}'\ncase "$1" in toolchain) echo leanprover/lean4:v4.0.0 ;; which) echo '${path.join(stubBin, 'lake')}' ;; esac\n`, { mode: 0o755 });
+        const pathBefore = process.env.PATH;
+        process.env.PATH = `${stubBin}${path.delimiter}${pathBefore}`;
+        try {
+          const lakeRun = async (options) => {
+            const made = helper.createHelper(Object.assign({ cacheDir: path.join(root, 'cache-lake'), cloneBase, tidyMinutes: 0, log: () => {} }, options));
+            made.allow('o/p');
+            made.start({ repo: 'o/p', sha: lakeCommit, pr: null, paths: ['P.lean'] });
+            while (made.status('o/p', lakeCommit).state === 'pending') await tick(20);
+            await made.idle();
+            const status = made.status('o/p', lakeCommit);
+            const reported = JSON.parse(made.handle('GET', '/status').body).sandbox;
+            made.shutdown();
+            return { status, reported, calls: fs.existsSync(stubCalls) ? fs.readFileSync(stubCalls, 'utf8') : '' };
+          };
+          for (const answer of [null, undefined, false, 'none', 'another-kind']) {
+            const refused = await lakeRun({ detectSandbox: async () => answer });
+            assert.strictEqual(refused.reported, 'none', `the check said ${answer}`);
+            assert.strictEqual(refused.status.state, 'error');
+            assert(/no working sandbox.*Lean is not run.*--no-sandbox/.test(refused.status.error), refused.status.error);
+            assert.strictEqual(refused.calls, '', 'refused before the Lean version is looked up, and before `lake` runs');
+          }
+          // A check that fails altogether is no sandbox either.
+          const broken = await lakeRun({ detectSandbox: () => Promise.reject(new Error('the check broke')) });
+          assert.strictEqual(broken.reported, 'none');
+          assert(/no working sandbox/.test(broken.status.error), broken.status.error);
+          assert.strictEqual(broken.calls, '');
+          // The one function that runs a project's command refuses by itself as well, whoever
+          // calls it and whatever was checked before.
+          const direct = helper.createHelper({ cacheDir: path.join(root, 'cache-lake'), log: () => {}, detectSandbox: async () => null });
+          await assert.rejects(direct.untrusted(path.join(stubBin, 'lake'), ['env', 'true'], { scratch: path.join(root, 'scratch-direct') }), /no working sandbox.*Lean is not run/);
+          assert(!fs.existsSync(stubCalls), 'the command was not run');
+          direct.shutdown();
+          // Until the check has answered, the helper says so to one who asks it directly, and
+          // does not answer over its port: what is read there is the check's answer.
+          const slow = helper.createHelper({ cacheDir: path.join(root, 'cache-lake'), log: () => {}, detectSandbox: () => new Promise((resolve) => setTimeout(() => resolve(null), 300)) });
+          assert.strictEqual(JSON.parse(slow.handle('GET', '/status').body).sandbox, 'checking');
+          const statusPort = await new Promise((resolve) => {
+            const probe = require('net').createServer();
+            probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
+          });
+          const listening = await helper.serve(slow, statusPort);
+          try {
+            const answer = await fetch(`http://127.0.0.1:${statusPort}/status`, { headers: { 'X-Lean-Lens-Token': slow.config.token } });
+            assert.strictEqual((await answer.json()).sandbox, 'none', 'over its port, never "checking"');
+          } finally {
+            listening.close();
+            slow.shutdown();
+          }
+          assert(fs.readFileSync(path.join(__dirname, '..', 'options', 'options.js'), 'utf8').includes("details.sandbox === 'checking'"), 'the options page has words for a check still under way');
+          // --no-sandbox: the reader asked for it, so the project's `lake` runs (here it fails).
+          const asked = await lakeRun({ sandbox: false, detectSandbox: async () => null });
+          assert.strictEqual(asked.reported, 'off');
+          assert(asked.calls.includes('elan which lake') && asked.calls.includes('lake env true'), asked.calls);
+          assert(!/no working sandbox/.test(asked.status.error || ''), asked.status.error);
+        } finally {
+          process.env.PATH = pathBefore;
+        }
+
         // --- Lean in a codespace. The helper here hands the run to the same helper there, shows
         // its progress and keeps its results. `gh` is played by test/fixtures/fake-gh.mjs: its
         // codespace is a folder, and the helper "in" it runs on this machine.

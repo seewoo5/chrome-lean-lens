@@ -113,6 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
             ? 'Lean runs in GitHub Codespaces, not on this machine.'
             : (details.sandbox === 'seatbelt' || details.sandbox === 'bwrap' ? 'Sandbox on.'
               : details.sandbox === 'off' ? 'Sandbox off (--no-sandbox): Lean runs with your permissions.'
+              : details.sandbox === 'checking' ? 'The helper is still checking whether this system has a sandbox: test again in a moment.'
                 : 'No sandbox on this system, so the helper will not run Lean (see the README).');
           helperTestResult.textContent = `✓ Connected. ${sandbox} Allowed repositories: ${allowed.length ? allowed.join(', ') : 'none yet'}.`;
           helperTestResult.style.color = '#3fb950';

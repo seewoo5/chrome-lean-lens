@@ -163,7 +163,7 @@ Worth knowing about what you allow:
 | `--keep-codespaces` | Leave codespaces running when idle and when the helper stops |
 | `--tidy-after MINUTES` | How long an unused build or codespace stays (default 30) |
 | `--port N` | Listen on another port (default 5326) |
-| `--no-sandbox` | Run a project's code without the sandbox |
+| `--no-sandbox` | Run a project's code without the sandbox, with your permissions (without this, no sandbox means no run) |
 
 `node helper/lean-lens-helper.mjs --help` lists the rest. The helper can also elaborate files without the extension:
 
