@@ -1248,8 +1248,8 @@ async function codespacesCommand(values) {
   const cacheDir = path.resolve(values.cache || defaultCacheDir());
   const { config, save } = loadConfig(cacheDir);
   const spaces = createCodespaces({ config, save, run, log: say, gh: values.gh, recordsDir: path.join(cacheDir, 'codespaces') });
-  const ours = await spaces.ours();
-  if (!ours.length) console.log("There are no codespaces that this helper's settings name.");
+  const { ours, unsure } = await spaces.inventory();
+  if (!ours.length && !unsure.length) console.log("There are no codespaces that this helper's settings name.");
   for (const space of ours) {
     if (space.busy && (values.delete || values.stop)) {
       // (Made for a run without a sandbox by a helper that is still running: it deletes it itself.)
@@ -1263,6 +1263,12 @@ async function codespacesCommand(values) {
     } else {
       say(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}${space.busy ? `  (in use by a running helper, process ${space.busy})` : ''}`);
     }
+  }
+  // (Used by an earlier version of the helper, which may have taken it over by the name shown
+  // for it: it need not be one a helper made, so it is never stopped or deleted here.)
+  if (unsure.length) {
+    console.log(`\nUsed by an earlier version of the helper, which may have taken ${unsure.length === 1 ? 'it' : 'them'} over from you by the name shown, so not stopped or deleted here:`);
+    for (const space of unsure) say(`${space.name}  ${space.repository}  ${space.state}  last used ${space.lastUsedAt || 'never'}  (to delete: gh codespace delete -c ${space.name})`);
   }
 }
 

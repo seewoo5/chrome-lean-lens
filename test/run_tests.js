@@ -2439,7 +2439,7 @@ console.log("22. Testing real Lean data (the local helper)...");
             // that carries the repository's name for it (another helper's lasting codespace, with
             // other settings: the two would stop each other's runs), not a noted one whatever it
             // is called, and not the one an earlier version noted without saying that code only
-            // ever ran confined in it. That one is set aside for `codespaces --delete`.
+            // ever ran confined in it. That one is set aside, and `codespaces` lists it.
             putFake((now) => {
               now.codespaces.find((space) => space.name === 'busy-1').displayName = cs.displayNameFor('o/r');
               for (const name of ['theirs-1', 'legacy-1']) now.codespaces.push({ name, displayName: cs.displayNameFor('o/r'), repository: 'o/r', state: 'Shutdown' });
@@ -2479,11 +2479,22 @@ console.log("22. Testing real Lean data (the local helper)...");
             assert(!fakeState().argv.slice(from).some((argv) => argv[1] === 'ports' || argv[1] === 'delete' || argv[1] === 'create'), 'no run was handed over, and the codespace stays for when the sandbox works');
             unconfined.shutdown();
             await portFree();
-            // The set-aside codespace is among those the command deletes; then it is forgotten.
+            // The set-aside codespace may be one of the reader's that an earlier version took over
+            // by its name, not one a helper made. The command lists it apart, with what deletes
+            // it, and neither stops nor deletes it with the others; the new one it does.
+            putFake((now) => { now.codespaces.find((space) => space.name === 'legacy-1').state = 'Available'; });
+            from = fakeState().argv.length;
+            const listedApart = command();
+            assert(/not stopped or deleted here/.test(listedApart.stdout) && /legacy-1 .*gh codespace delete -c legacy-1/.test(listedApart.stdout), listedApart.stdout + listedApart.stderr);
+            const stoppedApart = command('--stop');
+            assert(stoppedApart.stdout.includes('Left alone: busy-1') && !stoppedApart.stdout.includes('Stopped legacy-1'), stoppedApart.stdout + stoppedApart.stderr);
             const cleared = command('--delete');
-            assert(cleared.stdout.includes('Deleted legacy-1') && cleared.stdout.includes(`Deleted ${ownName}`) && cleared.stdout.includes('Left alone: busy-1'), cleared.stdout + cleared.stderr);
-            assert.deepStrictEqual(namesThere(), ['busy-1', 'lookalike', 'mine', 'theirs-1'].sort());
-            assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(here, 'config.json'), 'utf8')).retired, []);
+            assert(cleared.stdout.includes(`Deleted ${ownName}`) && !cleared.stdout.includes('Deleted legacy-1') && cleared.stdout.includes('Left alone: busy-1'), cleared.stdout + cleared.stderr);
+            assert(/legacy-1 .*gh codespace delete -c legacy-1/.test(cleared.stdout), cleared.stdout);
+            assert.deepStrictEqual(callsNaming(from, 'legacy-1'), [], 'nothing was asked of legacy-1');
+            assert.deepStrictEqual(namesThere(), ['busy-1', 'legacy-1', 'lookalike', 'mine', 'theirs-1'].sort());
+            assert.strictEqual(fakeState().codespaces.find((space) => space.name === 'legacy-1').state, 'Available');
+            assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(here, 'config.json'), 'utf8')).retired, [{ name: 'legacy-1', repo: 'o/r' }], 'and it stays listed');
             for (const name of ['mine.json', 'other.json', 'busy-1.json']) fs.rmSync(path.join(notesDir, name));
             putFake((now) => { now.codespaces = now.codespaces.filter((space) => space.name === 'mine'); });
             // A repository that allows only a larger machine (mathlib4 does) gets that one, and the

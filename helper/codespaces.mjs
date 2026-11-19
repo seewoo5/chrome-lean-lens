@@ -270,7 +270,7 @@ function explain(result) {
  *   `sandbox`: false when the reader accepted running without one (`--no-sandbox`);
  *   `keep`: leave codespaces running when they are idle and when the helper stops;
  *   `recordsDir`: the folder where the codespaces made for runs without a sandbox are noted.
- * @returns `{check, runJob, rest, shutdown, ours, stop, remove, tidy}`
+ * @returns `{check, runJob, rest, shutdown, inventory, ours, stop, remove, tidy}`
  */
 export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = true, keep = false, recordsDir = null, remotePort = REMOTE_PORT, cloneBase = null, pollMs = 1500, keepAliveMs = KEEP_ALIVE_MS, retryMs = 10 * 1000, machine = MACHINE, helperDir = here }) {
   if (!/^[A-Za-z0-9]+$/.test(machine)) throw new Error(`Not a codespace machine name: ${machine}`);
@@ -297,19 +297,28 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
 
   const list = async () => JSON.parse((await must(['codespace', 'list', '--limit', String(LIST_LIMIT), '--json', 'name,displayName,repository,state,lastUsedAt'])).stdout || '[]');
   /**
-   * The codespaces this helper's settings and notes name, on whichever repository: each
-   * repository's lasting one, those an earlier version used and this one no longer does
-   * (`retire`), and those made for runs without a sandbox. They are found by the identifier
-   * GitHub gave them, never by the name shown for them, which other codespaces can have too.
-   * One whose run is under way in a helper that is still running comes with `busy` set.
+   * The codespaces this helper's settings and notes name, on whichever repository, found by
+   * the identifier GitHub gave them, never by the name shown for them, which other codespaces
+   * can have too. Resolves to `{ ours, unsure }`. `ours`: each repository's lasting one and
+   * those made for runs without a sandbox, which this version of the helper made; one whose run
+   * is under way in a helper that is still running comes with `busy` set. `unsure`: those an
+   * earlier version used and this one no longer does (`retire`). Those versions took over a
+   * codespace by the name shown for it, so one of these may be a codespace of the reader's that
+   * no helper made: they are listed, and left for the reader to delete one by one.
    */
-  async function ours() {
+  async function inventory() {
     const named = new Map(); // identifier → what to add to its listing
-    for (const known of Object.values(config.codespaces)) if (known && isCodespaceName(known.name)) named.set(known.name, {});
-    for (const old of config.retired) if (old && isCodespaceName(old.name)) named.set(old.name, {});
+    for (const lasting of Object.values(config.codespaces)) if (lasting && isCodespaceName(lasting.name)) named.set(lasting.name, {});
     for (const entry of notes()) named.set(entry.name, entry.instance !== instance && stillRuns(entry) ? { busy: entry.pid } : {});
-    return (await list()).filter((space) => named.has(space.name)).map((space) => ({ ...space, ...named.get(space.name) }));
+    const retired = new Set(config.retired.filter((old) => old && isCodespaceName(old.name) && !named.has(old.name)).map((old) => old.name));
+    const all = await list();
+    return {
+      ours: all.filter((space) => named.has(space.name)).map((space) => ({ ...space, ...named.get(space.name) })),
+      unsure: all.filter((space) => retired.has(space.name)),
+    };
   }
+  /** The codespaces this helper made (`inventory().ours`). */
+  const ours = async () => (await inventory()).ours;
 
   /** A request to the helper in the codespace, through the forwarded port. */
   function call(session, method, pathname, body, timeoutMs = 30000) {
@@ -421,10 +430,10 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   /**
    * Stop using the codespace the settings name for a repository. One that is still there and
    * that an earlier version of the helper used is kept in the settings as retired, so that
-   * `codespaces --delete` finds it: under those versions, code could run in it without a
-   * sandbox (with --no-sandbox, or where the codespace had none and the reader could not push
-   * to the repository), and may have changed it. It is not deleted here: those versions also
-   * took over a codespace by its name, so it need not be one the helper made.
+   * `codespaces` lists it: under those versions, code could run in it without a sandbox (with
+   * --no-sandbox, or where the codespace had none and the reader could not push to the
+   * repository), and may have changed it. It is not deleted, here or by `codespaces --delete`:
+   * those versions also took over a codespace by its name, so it need not be one the helper made.
    */
   function retire(repo, all) {
     const known = config.codespaces[repo];
@@ -437,7 +446,7 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
       log(`${repo}: the codespace ${known.name} is not among the ${LIST_LIMIT} codespaces GitHub listed, so it is not used any more, and a new one is made. If it is still there, delete it with: gh codespace delete -c ${known.name}`);
     } else if (known && isCodespaceName(known.name) && known.confined !== true && there) {
       if (!config.retired.some((old) => old && old.name === known.name)) config.retired.push({ name: known.name, repo });
-      log(`${repo}: the codespace ${known.name}, which an earlier version of the helper used, is not used any more: code may have run in it without a sandbox. A new one is made. To delete the old one: node lean-lens-helper.mjs codespaces --delete (or: gh codespace delete -c ${known.name})`);
+      log(`${repo}: the codespace ${known.name}, which an earlier version of the helper used, is not used any more: code may have run in it without a sandbox. A new one is made. It may be a codespace of yours that the earlier version took over by its name, so it is left as it is; if you do not need it, delete it with: gh codespace delete -c ${known.name}`);
     }
     save();
   }
@@ -732,5 +741,5 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
     forgetNote(name);
   }
 
-  return { check, runJob, rest, shutdown, ours, stop, remove, tidy, run };
+  return { check, runJob, rest, shutdown, inventory, ours, stop, remove, tidy, run };
 }

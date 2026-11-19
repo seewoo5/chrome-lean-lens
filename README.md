@@ -110,14 +110,14 @@ gh auth refresh -h github.com -s codespace
 
 Then start the helper with `--codespaces`. From there it does the rest:
 
-- The first **Run Lean** on a repository creates a codespace on that repository, installs Lean in it and runs there. Hovering never creates one. The helper notes which codespace that is and uses that one from then on. A codespace an earlier version of the helper used is not used again (code could run in it without a sandbox): a new one is made, and `codespaces --delete` below removes the old one.
+- The first **Run Lean** on a repository creates a codespace on that repository, installs Lean in it and runs there. Hovering never creates one. The helper notes which codespace that is and uses that one from then on. A codespace an earlier version of the helper used is not used again (code could run in it without a sandbox): a new one is made. The old one is left as it is, since those versions took over a codespace by the name shown for it, so it may be one of yours; `codespaces` below lists it apart, with the `gh codespace delete -c <identifier>` that deletes it.
 - Results are copied to your machine, so hovers keep working after the codespace stops.
 - A codespace is stopped 30 minutes after its last run and when the helper stops. GitHub deletes it after a week unused.
 - If your machine sleeps or loses its network for a short while, the run carries on and is picked up again.
 
 A free GitHub account includes 120 core-hours a month, which is 60 hours of the two-core machine the helper asks for. There is one codespace per repository because GitHub's terms allow a codespace for work on the repository it was started on.
 
-To see, stop or delete the codespaces the helper uses. These are the ones its settings name, by the identifier GitHub gave each; a codespace is never picked by the name shown for it, so your others are left alone, and so is one that another running helper made for a run without a sandbox. A codespace made with other settings (another `--cache` folder, another machine) is not among them: `gh codespace list` shows it, and GitHub deletes it a week after it was last used.
+To see, stop or delete the codespaces the helper uses. These are the ones its settings name, by the identifier GitHub gave each; a codespace is never picked by the name shown for it, so your others are left alone, and so is one that another running helper made for a run without a sandbox. One an earlier version of the helper used is listed apart and never stopped or deleted by these commands. A codespace made with other settings (another `--cache` folder, another machine) is not among them: `gh codespace list` shows it, and GitHub deletes it a week after it was last used.
 
 ```bash
 node helper/lean-lens-helper.mjs codespaces
