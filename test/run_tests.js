@@ -2446,7 +2446,30 @@ console.log("22. Testing real Lean data (the local helper)...");
             });
             const settings = JSON.parse(fs.readFileSync(path.join(here, 'config.json'), 'utf8'));
             settings.codespaces['o/r'] = { name: 'legacy-1', token: 'a-token-from-before' };
+            // Right after the upgrade, before any run on o/r, the settings still name legacy-1 as
+            // the earlier version left them: without `confined`, so not known to be a helper's.
+            // `codespaces` lists it apart, and `--stop` and `--delete` leave it alone, while they
+            // stop and delete fresh-1, which this version made for o/s.
+            settings.codespaces['o/s'] = { name: 'fresh-1', token: 'its-own-token', confined: true };
             fs.writeFileSync(path.join(here, 'config.json'), JSON.stringify(settings));
+            putFake((now) => {
+              now.codespaces.find((space) => space.name === 'legacy-1').state = 'Available';
+              now.codespaces.push({ name: 'fresh-1', displayName: cs.displayNameFor('o/s'), repository: 'o/s', state: 'Available' });
+            });
+            from = fakeState().argv.length;
+            const beforeAnyRun = command();
+            assert(/fresh-1 .*Available[^]*not stopped or deleted here[^]*legacy-1 .*gh codespace delete -c legacy-1/.test(beforeAnyRun.stdout), beforeAnyRun.stdout + beforeAnyRun.stderr);
+            const stoppedBeforeAnyRun = command('--stop');
+            assert(stoppedBeforeAnyRun.stdout.includes('Stopped fresh-1') && !stoppedBeforeAnyRun.stdout.includes('Stopped legacy-1'), stoppedBeforeAnyRun.stdout + stoppedBeforeAnyRun.stderr);
+            const deletedBeforeAnyRun = command('--delete');
+            assert(deletedBeforeAnyRun.stdout.includes('Deleted fresh-1') && !deletedBeforeAnyRun.stdout.includes('Deleted legacy-1'), deletedBeforeAnyRun.stdout + deletedBeforeAnyRun.stderr);
+            assert.deepStrictEqual(callsNaming(from, 'fresh-1').map((argv) => argv[1]), ['stop', 'delete']);
+            assert.deepStrictEqual(callsNaming(from, 'legacy-1'), [], 'nothing was asked of legacy-1');
+            assert.strictEqual(fakeState().codespaces.find((space) => space.name === 'legacy-1').state, 'Available');
+            assert(!namesThere().includes('fresh-1'));
+            const untouched = JSON.parse(fs.readFileSync(path.join(here, 'config.json'), 'utf8'));
+            assert.deepStrictEqual([untouched.codespaces, untouched.retired], [{ 'o/r': { name: 'legacy-1', token: 'a-token-from-before' } }, []], 'and the settings still name it, for the next run to retire');
+            putFake((now) => { now.codespaces.find((space) => space.name === 'legacy-1').state = 'Shutdown'; });
             from = fakeState().argv.length;
             const adopting = withCodespaces({});
             adopting.start({ repo: 'o/r', sha: commit, pr: null, paths: ['A.lean'] });

@@ -302,15 +302,22 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
    * can have too. Resolves to `{ ours, unsure }`. `ours`: each repository's lasting one and
    * those made for runs without a sandbox, which this version of the helper made; one whose run
    * is under way in a helper that is still running comes with `busy` set. `unsure`: those an
-   * earlier version used and this one no longer does (`retire`). Those versions took over a
-   * codespace by the name shown for it, so one of these may be a codespace of the reader's that
-   * no helper made: they are listed, and left for the reader to delete one by one.
+   * earlier version used, whether this one has stopped using them (`retire`) or the settings
+   * still name one for its repository because no run there has come since: a lasting one this
+   * version did not make has no `confined`. Those versions took over a codespace by the name
+   * shown for it, so one of these may be a codespace of the reader's that no helper made: they
+   * are listed, and left for the reader to delete one by one.
    */
   async function inventory() {
     const named = new Map(); // identifier → what to add to its listing
-    for (const lasting of Object.values(config.codespaces)) if (lasting && isCodespaceName(lasting.name)) named.set(lasting.name, {});
+    const earlier = new Set(config.retired.filter((old) => old && isCodespaceName(old.name)).map((old) => old.name));
+    for (const lasting of Object.values(config.codespaces)) {
+      if (lasting && isCodespaceName(lasting.name)) {
+        if (lasting.confined === true) named.set(lasting.name, {}); else earlier.add(lasting.name);
+      }
+    }
     for (const entry of notes()) named.set(entry.name, entry.instance !== instance && stillRuns(entry) ? { busy: entry.pid } : {});
-    const retired = new Set(config.retired.filter((old) => old && isCodespaceName(old.name) && !named.has(old.name)).map((old) => old.name));
+    const retired = new Set([...earlier].filter((name) => !named.has(name)));
     const all = await list();
     return {
       ours: all.filter((space) => named.has(space.name)).map((space) => ({ ...space, ...named.get(space.name) })),
