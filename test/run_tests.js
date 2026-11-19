@@ -2201,7 +2201,8 @@ console.log("22. Testing real Lean data (the local helper)...");
 
         // No working sandbox on this system (the check's answer is given here, since the machine
         // the tests run on usually has one): a project's code is not run, and nothing is looked
-        // up or installed for it. `elan` and `lake` are stand-ins that note each call.
+        // up or installed for it. `elan` and `lake` are stand-ins that note each call; the `lake`
+        // is in a folder laid out as a Lean installation (`bin/lake`, `lib/lean`) of its own.
         const lakeOrigin = path.join(root, 'lake-origin');
         fs.mkdirSync(lakeOrigin);
         git(lakeOrigin, 'init', '--quiet');
@@ -2214,9 +2215,13 @@ console.log("22. Testing real Lean data (the local helper)...");
         git(root, 'clone', '--quiet', '--bare', lakeOrigin, path.join(root, 'remotes', 'o', 'p.git'));
         const stubBin = path.join(root, 'stub-bin');
         const stubCalls = path.join(root, 'stub-calls');
+        const standIn = path.join(root, 'stand-in-lean');
+        const standInLake = path.join(standIn, 'bin', 'lake');
         fs.mkdirSync(stubBin);
-        fs.writeFileSync(path.join(stubBin, 'lake'), `#!/bin/sh\necho "lake $*" >> '${stubCalls}'\nexit 1\n`, { mode: 0o755 });
-        fs.writeFileSync(path.join(stubBin, 'elan'), `#!/bin/sh\necho "elan $*" >> '${stubCalls}'\ncase "$1" in toolchain) echo leanprover/lean4:v4.0.0 ;; which) echo '${path.join(stubBin, 'lake')}' ;; esac\n`, { mode: 0o755 });
+        fs.mkdirSync(path.join(standIn, 'bin'), { recursive: true });
+        fs.mkdirSync(path.join(standIn, 'lib', 'lean'), { recursive: true });
+        fs.writeFileSync(standInLake, `#!/bin/sh\necho "lake $*" >> '${stubCalls}'\nexit 1\n`, { mode: 0o755 });
+        fs.writeFileSync(path.join(stubBin, 'elan'), `#!/bin/sh\necho "elan $*" >> '${stubCalls}'\ncase "$1" in toolchain) echo leanprover/lean4:v4.0.0 ;; which) echo '${standInLake}' ;; esac\n`, { mode: 0o755 });
         const pathBefore = process.env.PATH;
         process.env.PATH = `${stubBin}${path.delimiter}${pathBefore}`;
         try {
@@ -2246,7 +2251,7 @@ console.log("22. Testing real Lean data (the local helper)...");
           // The one function that runs a project's command refuses by itself as well, whoever
           // calls it and whatever was checked before.
           const direct = helper.createHelper({ cacheDir: path.join(root, 'cache-lake'), log: () => {}, detectSandbox: async () => null });
-          await assert.rejects(direct.untrusted(path.join(stubBin, 'lake'), ['env', 'true'], { scratch: path.join(root, 'scratch-direct') }), /no working sandbox.*Lean is not run/);
+          await assert.rejects(direct.untrusted(standInLake, ['env', 'true'], { scratch: path.join(root, 'scratch-direct') }), /no working sandbox.*Lean is not run/);
           assert(!fs.existsSync(stubCalls), 'the command was not run');
           direct.shutdown();
           // Until the check has answered, the helper says so to one who asks it directly, and
