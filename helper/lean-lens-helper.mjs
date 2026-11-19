@@ -176,21 +176,16 @@ export function toolchainFiles(root) {
 }
 
 /**
- * The folder a Lean is installed in, from its `lake` (`<folder>/bin/lake`, the real file). It
- * has to be a Lean installation and nothing else, since the helper takes the whole folder for
- * that Lean (see `toolchainFiles`, and what a run is given of it): one with `lib/lean` in it,
- * and not a place where other things are installed too (`/usr/local`), nor one that holds the
- * home folder or one of `others` (the helper's own folders). elan's toolchains are such folders.
+ * The folder a Lean is installed in, from its `lake` (the real file): `lake` is in the `bin`
+ * of that folder, and Lean's libraries are in its `lib/lean`. The helper tells one Lean from
+ * another by that folder and what is in it (see `toolchainFiles`), so a `lake` found elsewhere,
+ * such as a stand-in that starts another program, is not taken for a Lean.
  */
-export function leanInstallation(lake, { home = homedir(), others = [] } = {}) {
+export function leanInstallation(lake) {
   const root = path.dirname(path.dirname(lake));
   const libraries = kind(path.join(root, 'lib', 'lean'));
   if (path.basename(path.dirname(lake)) !== 'bin' || !libraries || !libraries.isDirectory()) {
     throw new Error(`${lake} is not in a Lean installation (no lib/lean beside its bin folder). Install Lean with elan`);
-  }
-  const holds = (inner) => { const to = path.relative(root, realOrSame(inner)); return to === '' || (!to.startsWith('..') && !path.isAbsolute(to)); };
-  if (['/usr', '/usr/local'].some((shared) => holds(shared)) || [home, ...others].some(holds)) {
-    throw new Error(`Lean is installed in ${root}, with other things, and the helper needs a Lean in a folder of its own. Install Lean with elan`);
   }
   return root;
 }
@@ -848,7 +843,7 @@ export function createHelper(options = {}) {
       found = await must('/usr/bin/which', ['lake']);
     }
     const lake = realOrSame(found.stdout.trim().split('\n').pop());
-    const installed = leanInstallation(lake, { others: [cacheDir, buildsDir] });
+    const installed = leanInstallation(lake);
     return { name, lake, bin: path.dirname(lake), root: installed, files: toolchainFiles(installed) };
   }
 

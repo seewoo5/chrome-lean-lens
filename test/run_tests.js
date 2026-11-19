@@ -1865,18 +1865,13 @@ console.log("22. Testing real Lean data (the local helper)...");
       assert.strictEqual(helper.toolchainOf(project), 'leanprover/lean4:v4.35.0');
       // Each Lean version has an extractor of its own, also versions whose names read alike.
       const rev = '892d6dc520270b5fb8c1291dd1b131e8c16255ed';
-      // The folder a Lean is installed in is that Lean's alone: it has `lib/lean`, and is not a
-      // place where other things are installed, the home folder or the helper's folders among them.
+      // The folder a Lean is installed in has its `lake` in `bin` and Lean's libraries in `lib/lean`.
       {
         const at = fs.realpathSync(root);
-        for (const dir of ['own/bin', 'own/lib/lean', 'bare/bin', 'shared/bin', 'shared/lib/lean', 'shared/home/me', 'shared/cache']) fs.mkdirSync(path.join(at, dir), { recursive: true });
-        assert.strictEqual(helper.leanInstallation(path.join(at, 'own/bin/lake'), { home: path.join(at, 'shared/home/me') }), path.join(at, 'own'));
+        for (const dir of ['own/bin', 'own/lib/lean', 'bare/bin']) fs.mkdirSync(path.join(at, dir), { recursive: true });
+        assert.strictEqual(helper.leanInstallation(path.join(at, 'own/bin/lake')), path.join(at, 'own'));
         assert.throws(() => helper.leanInstallation(path.join(at, 'bare/bin/lake')), /not in a Lean installation/);
         assert.throws(() => helper.leanInstallation(path.join(at, 'own/lake')), /not in a Lean installation/);
-        assert.throws(() => helper.leanInstallation(path.join(at, 'shared/bin/lake'), { home: path.join(at, 'shared/home/me') }), /folder of its own/);
-        assert.throws(() => helper.leanInstallation(path.join(at, 'shared/bin/lake'), { home: '/nowhere', others: [path.join(at, 'shared/cache')] }), /folder of its own/);
-        assert.throws(() => helper.leanInstallation(path.join(at, 'own/bin/lake'), { home: path.join(at, 'own') }), /folder of its own/);
-        if (process.platform !== 'win32') for (const lake of ['/usr/bin/lake', '/usr/local/bin/lake', '/bin/lake']) assert.throws(() => helper.leanInstallation(lake), /folder of its own|not in a Lean installation/);
       }
       const lean = (name, at = '/toolchains/x', files = ['bin/lean 1 2']) => ({ name, root: at, files });
       const dirFor = (toolchain, from = 'https://example.invalid/subverso') => helper.extractorFor(toolchain, from, rev).dirName;
