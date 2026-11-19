@@ -69,13 +69,39 @@ function alive(pid) {
 }
 
 /**
- * When a process started, as `ps` puts it, or null when that cannot be asked. It tells a
+ * When a process started, in a form that reads the same whoever asks and wherever: it tells a
  * process from a later one that was given the same number (after a restart of the machine or
- * of a container, numbers come round again).
+ * of a container, numbers come round again). On Linux, `proc:<boot>:<ticks>`: the system's
+ * count of ticks from its start to the process's, with which start of the system that was.
+ * Elsewhere `ps:<seconds>`, from `ps`, asked in UTC: it answers in the asker's time zone, and
+ * two helpers need not share one. Null when it cannot be asked or read.
  */
-function startOf(pid) {
-  const asked = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10 * 1000, env: { ...process.env, LC_ALL: 'C' } });
-  return asked.status === 0 && asked.stdout.trim() ? asked.stdout.trim() : null;
+export function startOf(pid) {
+  if (process.platform === 'linux') {
+    try {
+      // (After the name, which is in brackets and may hold anything: the 22nd field is the 20th from there.)
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const ticks = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+      const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+      if (/^\d+$/.test(ticks) && /^[0-9a-f-]{8,}$/i.test(boot)) return `proc:${boot}:${ticks}`;
+    } catch { /* no /proc: ask `ps` */ }
+  }
+  const asked = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10 * 1000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
+  const at = asked.status === 0 ? Date.parse(`${asked.stdout.trim()} UTC`) : NaN;
+  return Number.isFinite(at) ? `ps:${Math.round(at / 1000)}` : null;
+}
+/**
+ * Whether two such readings are surely of different processes. In doubt they are not: one that
+ * cannot be read, or two taken in different ways, say nothing, and `ps` gives whole seconds
+ * that may fall on either side of one. (Calling a running helper stopped would have its
+ * codespace deleted under it; the other mistake leaves a codespace that GitHub deletes.)
+ */
+export function startsDiffer(noted, now) {
+  const read = (value) => /^(proc:[0-9a-f-]+:\d+|ps:\d+)$/i.test(String(value)) ? String(value) : null;
+  const [a, b] = [read(noted), read(now)];
+  if (!a || !b || a.slice(0, 3) !== b.slice(0, 3)) return false;
+  if (a.startsWith('ps:')) return Math.abs(Number(a.slice(3)) - Number(b.slice(3))) > 2;
+  return a !== b;
 }
 let ownStart; // of this process: asked once, when first needed
 // The helpers of this process (their `instance`) that have not stopped.
@@ -403,7 +429,13 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   function retire(repo, all) {
     const known = config.codespaces[repo];
     delete config.codespaces[repo];
-    if (known && isCodespaceName(known.name) && known.confined !== true && all.some((entry) => entry.name === known.name)) {
+    // (A listing that is cut short does not say that a codespace is gone: then it is set aside
+    // whichever version made it, since it may well be there.)
+    const there = Boolean(known) && all.some((entry) => entry.name === known.name);
+    if (known && isCodespaceName(known.name) && !there && all.length >= LIST_LIMIT) {
+      if (!config.retired.some((old) => old && old.name === known.name)) config.retired.push({ name: known.name, repo });
+      log(`${repo}: the codespace ${known.name} is not among the ${LIST_LIMIT} codespaces GitHub listed, so it is not used any more, and a new one is made. If it is still there, delete it with: gh codespace delete -c ${known.name}`);
+    } else if (known && isCodespaceName(known.name) && known.confined !== true && there) {
       if (!config.retired.some((old) => old && old.name === known.name)) config.retired.push({ name: known.name, repo });
       log(`${repo}: the codespace ${known.name}, which an earlier version of the helper used, is not used any more: code may have run in it without a sandbox. A new one is made. To delete the old one: node lean-lens-helper.mjs codespaces --delete (or: gh codespace delete -c ${known.name})`);
     }
@@ -488,13 +520,12 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
    * say: a helper started anew in a container gets the same number again, and after a restart
    * of the machine the number is some other program's. So a note with this process's number
    * is of a running helper only if that helper is one of this process's; and for another
-   * process, when it started has to be what the note says (where both are known).
+   * process, when it started must not differ from what the note says (see `startsDiffer`).
    */
   function stillRuns(entry) {
     if (running.has(entry.instance)) return true;
     if (entry.pid === process.pid || !alive(entry.pid)) return false;
-    const now = typeof entry.started === 'string' ? startOf(entry.pid) : null;
-    return now === null || now === entry.started;
+    return !startsDiffer(entry.started, startOf(entry.pid));
   }
   const forgetNote = (name) => { if (recordsDir && isCodespaceName(name)) rmSync(noteFile(name), { force: true }); };
   /** What is noted: `[{name, repo, pid, started, instance}]`. A file that is not such a note is passed over. */
@@ -695,7 +726,7 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   /** Delete one of this helper's codespaces by name, and forget it. */
   async function remove(name) {
     await must(['codespace', 'delete', '-c', name, '--force'], { timeoutMs: 3 * 60 * 1000 });
-    for (const [repo, known] of Object.entries(config.codespaces)) if (known.name === name) delete config.codespaces[repo];
+    for (const [repo, known] of Object.entries(config.codespaces)) if (!known || known.name === name) delete config.codespaces[repo];
     config.retired = config.retired.filter((old) => old && old.name !== name);
     save();
     forgetNote(name);

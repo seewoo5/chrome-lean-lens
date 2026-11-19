@@ -2314,6 +2314,17 @@ console.log("22. Testing real Lean data (the local helper)...");
             for (let i = 0; !notesIn(notesDir).length; i++) { assert(i < 1500, `no codespace noted: ${heard.join(' | ')}`); await tick(20); }
             const firstName = notesIn(notesDir)[0].replace(/\.json$/, '');
             assert(namesThere().includes(firstName));
+            // To a helper or a command started in another time zone, the first helper is as much
+            // running as to any: when its process started is noted and asked in one way everywhere.
+            const elsewhere = spawnSync(process.execPath, [path.join(helperDir, 'lean-lens-helper.mjs'), 'codespaces', '--cache', here, '--gh', path.join(__dirname, 'fixtures', 'fake-gh.mjs')],
+              { encoding: 'utf8', env: Object.assign({}, process.env, { TZ: (process.env.TZ || '') === 'Pacific/Kiritimati' ? 'Pacific/Pago_Pago' : 'Pacific/Kiritimati' }) });
+            assert(new RegExp(`${firstName} .*in use by a running helper`).test(elsewhere.stdout), elsewhere.stdout + elsewhere.stderr);
+            if (cs.startOf(process.pid)) assert(/^(proc:[0-9a-f-]+:\d+|ps:\d+)$/.test(JSON.parse(fs.readFileSync(path.join(notesDir, `${firstName}.json`), 'utf8')).started), 'noted with when its process started');
+            // Readings that surely differ, and those that leave a doubt (then the helper is taken to run).
+            assert(cs.startsDiffer('ps:1000', 'ps:1003') && cs.startsDiffer('proc:ab-1:5', 'proc:ab-1:6') && cs.startsDiffer('proc:ab-1:5', 'proc:ab-2:5'));
+            for (const [noted, now] of [['ps:1000', 'ps:1002'], ['ps:1000', 'ps:999'], ['ps:1000', null], [undefined, 'ps:1000'], ['ps:1000', 'proc:ab-1:5'], ['Thu Jan  1 00:00:00 1970', 'ps:1000'], ['proc:ab-1:5', 'proc:ab-1:5']]) {
+              assert(!cs.startsDiffer(noted, now), `${noted} and ${now}`);
+            }
             for (const cacheDir of [here, path.join(root, 'cache-elsewhere')]) {
               from = fakeState().argv.length;
               // (The same commit would wait behind the first helper's run only within one helper.)
@@ -2353,9 +2364,8 @@ console.log("22. Testing real Lean data (the local helper)...");
             // `lookalike`, for all that it looks like the others.
             const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
             const noteOf = (name, pid, more = {}) => fs.writeFileSync(path.join(notesDir, `${name}.json`), JSON.stringify(Object.assign({ name, repo: 'o/r', pid, instance: 'another-helper' }, more)));
-            // (When a process started, as the helper asks it: `ps` may be out of reach where the tests run.)
-            const startOf = (pid) => { const asked = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: Object.assign({}, process.env, { LC_ALL: 'C' }) }); return asked.status === 0 ? asked.stdout.trim() : ''; };
-            const parentStart = startOf(process.ppid);
+            // (When a process started, as the helper reads it: that may be out of reach where the tests run.)
+            const parentStart = cs.startOf(process.ppid);
             // A process number alone does not say that a helper still runs. `left-3` was noted
             // under this process's own number by a helper that is none of this process's (a helper
             // started anew in a container gets its number again); `left-4` under the number of a
@@ -2368,7 +2378,7 @@ console.log("22. Testing real Lean data (the local helper)...");
             noteOf('left-1', deadPid);
             noteOf('gone-1', deadPid);
             noteOf('left-3', process.pid);
-            if (parentStart) noteOf('left-4', process.ppid, { started: 'Thu Jan  1 00:00:00 1970' });
+            if (parentStart) noteOf('left-4', process.ppid, { started: parentStart.startsWith('ps:') ? 'ps:1' : 'proc:00000000-0000:1' });
             noteOf('busy-1', process.ppid, parentStart ? { started: parentStart } : {});
             // (Not notes: these name nothing that is deleted.)
             fs.writeFileSync(path.join(notesDir, 'mine.json'), JSON.stringify({ name: 'lookalike', repo: 'o/r', pid: deadPid, instance: 'x' }));
