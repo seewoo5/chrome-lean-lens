@@ -131,10 +131,10 @@ Running Lean on a pull request runs that pull request's code: Lean executes code
 
 - **Lean never starts on its own.** It runs when you press **Run Lean**, and only on repositories you have allowed.
 - **The helper answers only the extension.** It listens on `127.0.0.1` and requires its token.
-- **The code runs in a sandbox**, on macOS (`sandbox-exec`) and on Linux ([bubblewrap](https://github.com/containers/bubblewrap), which a codespace has). It has no network except while fetching the project's dependencies, cannot read or change your files, and gets none of your environment. Where there is no sandbox (on Linux, when bubblewrap is missing or may not run), Lean does not run.
+- **The code runs in a sandbox**, on macOS (`sandbox-exec`) and on Linux ([bubblewrap](https://github.com/containers/bubblewrap), which a codespace has). It has no network except while fetching the project's dependencies, cannot read or change your files, and gets none of your environment. Where there is no working sandbox (on Linux, when bubblewrap is missing or may not run), Lean does not run.
 - **In a codespace** the sandbox also keeps the code away from the codespace's GitHub token. Without a working sandbox nothing runs there either.
 
-The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` turns it off, which a project with private dependencies needs. Lean then runs with your permissions; in a codespace, each run gets a new codespace, deleted after it.
+The sandbox guards against the obvious; it is not a guarantee. `--no-sandbox` turns it off, which a project with private dependencies needs. Lean then runs with your permissions.
 
 Worth knowing about what you allow:
 

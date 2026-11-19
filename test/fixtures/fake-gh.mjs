@@ -80,9 +80,6 @@ if (args[0] === 'api') {
   stopHelper(space.name);
   space.state = 'Shutdown';
   save(state);
-} else if (args[1] === 'edit') {
-  named().displayName = option('--display-name');
-  save(state);
 } else if (args[1] === 'delete') {
   const space = named();
   stopHelper(space.name);

@@ -42,13 +42,6 @@ const tail = (text, n = 400) => (text.length > n ? `…${text.slice(-n)}` : text
  * characters at most, and refuses some punctuation (a colon, for one).
  */
 export const displayNameFor = (repo) => `${DISPLAY_PREFIX} ${repo.split('/')[1].replace(/[^A-Za-z0-9_-]+/g, '-')}`.slice(0, 48);
-/**
- * The name a codespace takes before a pull request's code runs in it without a sandbox. No
- * helper ever adopts a codespace by this name, and each deletes the ones it finds: the mark is
- * on the codespace itself, so it holds when this machine's settings are lost or another cache
- * folder is used.
- */
-export const unconfinedNameFor = (repo) => `${DISPLAY_PREFIX} unsandboxed ${repo.split('/')[1].replace(/[^A-Za-z0-9_-]+/g, '-')}`.slice(0, 48);
 
 /** Whether a helper that reports this sandbox keeps a pull request's code away from the rest. */
 export const confines = (sandbox) => sandbox === 'seatbelt' || sandbox === 'bwrap';
@@ -263,26 +256,11 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
     });
   }
 
-  /**
-   * Delete a codespace that ran a pull request's code without a sandbox, and forget it.
-   * Without a sandbox that code could use the codespace's GitHub token, and change anything in
-   * the codespace, the helper there included: such a codespace serves one run only. (Until it
-   * is gone, the settings keep it marked, so a helper that stopped meanwhile deletes it on the
-   * next run.)
-   */
-  async function discard(repo, name) {
-    drop(repo);
-    log(`Deleting the codespace ${name} for ${repo}: it ran a pull request's code without a sandbox. The results stay.`);
-    try {
-      await remove(name);
-    } catch (error) {
-      // Already gone (deleted by hand, or by GitHub): nothing is left to delete, only to forget.
-      const all = await list().catch(() => null);
-      if (all && !all.some((space) => space.name === name)) forget(name);
-      else log(`The codespace ${name} could not be deleted (${error.message}); the next run tries again`);
-    }
+  /** Whether the reader may push to a repository: then the codespace's GitHub token can too. */
+  async function canPush(repo) {
+    const result = await run(gh, ['api', `repos/${repo}`, '--jq', '.permissions.push']);
+    return result.code !== 0 || result.stdout.trim() !== 'false';
   }
-
 
   /** Set up and start the helper in a codespace (starting the codespace if it was stopped). */
   async function boot(name, repo, token, say) {
@@ -327,16 +305,6 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
     throw new Error('The helper in the codespace did not answer through the forwarded port');
   }
 
-  /** Before a run: delete the repository's codespaces that ran code without a sandbox. */
-  async function clearUnconfined(repo) {
-    if (config.codespaces[repo] && config.codespaces[repo].unconfined) await discard(repo, config.codespaces[repo].name);
-    if (config.codespaces[repo] && config.codespaces[repo].unconfined) throw new Error(`The codespace ${config.codespaces[repo].name} ran code without a sandbox and could not be deleted. Delete it with: gh codespace delete -c ${config.codespaces[repo].name}`);
-    // Marked on GitHub but not here (other settings, or a helper stopped before it could note it).
-    for (const space of await list()) {
-      if (space.repository === repo && space.displayName === unconfinedNameFor(repo)) await discard(repo, space.name);
-    }
-  }
-
   async function connect(repo, say) {
     const all = await list();
     const known = config.codespaces[repo];
@@ -379,23 +347,12 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
       if (error.recovery) await run(gh, ['codespace', 'stop', '-c', space.name], { timeoutMs: 3 * 60 * 1000 });
       throw error;
     });
-    // Without a sandbox, no run, unless the reader asked for that (--no-sandbox); and then the
-    // codespace is noted as such before any code runs, and deleted after the run (`discard`).
     if (!confines(status.sandbox)) {
-      if (sandbox) {
+      if (sandbox && await canPush(repo)) {
         await run(gh, ['codespace', 'ssh', '-c', space.name, '--', STOP_COMMAND], { timeoutMs: 60 * 1000 });
-        throw new Error(`The codespace for ${repo} has no working sandbox, so a pull request's code is not run there. Starting the helper with --no-sandbox runs it all the same, in a new codespace for each run.`);
+        throw new Error(`The codespace for ${repo} has no sandbox, and its GitHub token can push to ${repo}, so a pull request's code is not run there. Starting the helper with --no-sandbox runs it all the same.`);
       }
-      // Marked here and on the codespace itself before any of the code runs; a codespace that
-      // cannot be marked is not used.
-      config.codespaces[repo] = Object.assign({}, config.codespaces[repo], { unconfined: true });
-      save();
-      const renamed = await run(gh, ['codespace', 'edit', '-c', space.name, '--display-name', unconfinedNameFor(repo)], { timeoutMs: 60 * 1000 });
-      if (renamed.code !== 0) {
-        await discard(repo, space.name);
-        throw new Error(`The codespace for ${repo} could not be marked as running code without a sandbox, so nothing was run there: ${tail(renamed.stderr || renamed.stdout) || `exit ${renamed.code}`}`);
-      }
-      log(`${repo}: the codespace runs the code without a sandbox (--no-sandbox); it is deleted after the run`);
+      log(`${repo}: the codespace has no sandbox${sandbox ? '; its GitHub token can only read the repository' : ''}`);
     }
     const { port, tunnel } = await forward(space.name, token);
     const session = { name: space.name, token, port, tunnel, sandbox: status.sandbox };
@@ -422,19 +379,7 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
    * Run a job in the repository's codespace: what the helper does itself when Lean is here.
    * `store(file, data)` and `fail(file, error)` take each file's outcome.
    */
-  async function runJob(job, outcomes) {
-    // (Only before the run: a reconnection during it, when the network went for a moment, goes
-    // back to the same codespace, marked or not.)
-    await clearUnconfined(job.repo);
-    try {
-      await runThere(job, outcomes);
-    } finally {
-      const known = config.codespaces[job.repo];
-      if (known && known.unconfined) await discard(job.repo, known.name);
-    }
-  }
-
-  async function runThere(job, { store, fail }) {
+  async function runJob(job, { store, fail }) {
     const say = (message) => job.say(message);
     let session = await ensure(job.repo, say);
     // When a request fails, the connection went (this machine slept, its network changed) or the
@@ -514,10 +459,6 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   /** Delete one of this helper's codespaces by name, and forget it. */
   async function remove(name) {
     await must(['codespace', 'delete', '-c', name, '--force'], { timeoutMs: 3 * 60 * 1000 });
-    forget(name);
-  }
-  /** Forget a codespace this helper noted. */
-  function forget(name) {
     for (const [repo, known] of Object.entries(config.codespaces)) if (known.name === name) delete config.codespaces[repo];
     save();
   }

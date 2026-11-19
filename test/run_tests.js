@@ -2163,38 +2163,6 @@ console.log("22. Testing real Lean data (the local helper)...");
             assert(heard.some((message) => message.includes('needs a larger codespace than the smallest: using standardLinux32gb')), heard.join(' | '));
             h12.shutdown();
             await spaces.remove(fakeState().codespaces.find((space) => space.displayName === 'Lean Lens r').name);
-            // --no-sandbox: the codespace runs the code without one, and serves that one run.
-            const hn = withCodespaces({ sandbox: false });
-            hn.start({ repo: 'o/r', sha: commit, pr: null, paths: ['A.lean'] });
-            await finish(hn, commit);
-            assert.strictEqual(hn.status('o/r', commit).state, 'done', hn.status('o/r', commit).error);
-            assert(!fakeState().codespaces.some((space) => space.displayName === 'Lean Lens r'), 'deleted after the run');
-            assert.strictEqual(hn.config.codespaces['o/r'], undefined, 'and forgotten');
-            assert(heard.some((message) => message.includes('it ran a pull request\'s code without a sandbox')), heard.join(' | '));
-            assert(fakeState().calls.includes('codespace edit'), 'marked on the codespace itself before the run');
-            hn.shutdown();
-            // A codespace marked on GitHub but not in these settings is never used, and goes.
-            fake = fakeState();
-            fake.codespaces.push({ name: 'tainted', displayName: cs.unconfinedNameFor('o/r'), repository: 'o/r', state: 'Available' });
-            fs.writeFileSync(path.join(fakeDir, 'state.json'), JSON.stringify(fake));
-            const hm = withCodespaces({});
-            hm.start({ repo: 'o/r', sha: commit, pr: null, paths: ['A.lean'] });
-            await finish(hm, commit);
-            assert.strictEqual(hm.status('o/r', commit).state, 'done', hm.status('o/r', commit).error);
-            assert(!fakeState().codespaces.some((space) => space.name === 'tainted'), 'deleted');
-            assert.notStrictEqual(hm.config.codespaces['o/r'].name, 'tainted', 'and another one used');
-            hm.shutdown();
-            // One marked here that is gone already (deleted by hand) is forgotten, not a lasting refusal.
-            await spaces.remove(hm.config.codespaces['o/r'].name);
-            hm.config.codespaces['o/r'] = { name: 'gone-1', token: 'x', unconfined: true };
-            fs.writeFileSync(path.join(here, 'config.json'), JSON.stringify(hm.config));
-            const hg = withCodespaces({});
-            hg.start({ repo: 'o/r', sha: commit, pr: null, paths: ['A.lean'] });
-            await finish(hg, commit);
-            assert.strictEqual(hg.status('o/r', commit).state, 'done', hg.status('o/r', commit).error);
-            assert.notStrictEqual(hg.config.codespaces['o/r'].name, 'gone-1');
-            hg.shutdown();
-            await spaces.remove(hg.config.codespaces['o/r'].name);
             const h13 = withCodespaces({ machine: 'largeLinux' });
             h13.start({ repo: 'o/r', sha: commit, pr: null, paths: ['A.lean'] });
             await finish(h13, commit);
