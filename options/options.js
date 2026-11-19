@@ -23,6 +23,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const statLoogle = document.getElementById('stat-loogle');
 
   let currentSettings = {};
+  // The helper's settings are kept apart, and now and then cannot be read: the fields then show
+  // none, and what they show is not sent back as the settings unless it was changed here.
+  const HELPER_SETTINGS = ['enableHelper', 'helperUrl', 'helperToken'];
+  let helperUnread = false;
 
   // Load existing settings and stats
   chrome.runtime.sendMessage({ action: "GET_SETTINGS" }, (res) => {
@@ -38,6 +42,10 @@ document.addEventListener('DOMContentLoaded', () => {
       enableHelper.checked = Boolean(currentSettings.enableHelper);
       helperUrl.value = currentSettings.helperUrl || 'http://127.0.0.1:5326';
       helperToken.value = currentSettings.helperToken || '';
+      helperUnread = res.helperKept === 'unread';
+      if (helperUnread) {
+        helperTestResult.textContent = 'The helper\'s saved address and token could not be read just now. Open this page again in a moment to see them; what you enter here replaces them.';
+      }
     }
 
     if (res && res.stats) {
@@ -61,8 +69,10 @@ document.addEventListener('DOMContentLoaded', () => {
       helperUrl: helperUrl.value.trim(),
       helperToken: helperToken.value.trim()
     };
+    const toSave = { ...currentSettings };
+    if (helperUnread) for (const key of HELPER_SETTINGS) delete toSave[key];
 
-    chrome.runtime.sendMessage({ action: "SET_SETTINGS", settings: currentSettings }, (res) => {
+    chrome.runtime.sendMessage({ action: "SET_SETTINGS", settings: toSave }, (res) => {
       saveStatus.classList.add('visible');
       setTimeout(() => saveStatus.classList.remove('visible'), 1500);
       // The helper's address and token are kept where no web page can reach them. Where the
@@ -96,12 +106,16 @@ document.addEventListener('DOMContentLoaded', () => {
   enableBuiltins.addEventListener('change', saveSettings);
   showOutline.addEventListener('change', saveSettings);
   enableLoogle.addEventListener('change', saveSettings);
+  // (Changed here, the helper's settings are this page's to save, whatever it was shown.)
+  const helperChanged = () => { helperUnread = false; };
+  enableHelper.addEventListener('change', helperChanged);
   enableHelper.addEventListener('change', saveSettings);
   // Save while typing or pasting too: `change` waits for the field to lose focus, which never
   // happens when the page is closed right after pasting (Firefox's options sit in about:addons).
   let typingTimer = null;
   const saveSoon = () => { clearTimeout(typingTimer); typingTimer = setTimeout(saveSettings, 300); };
   for (const field of [helperUrl, helperToken]) {
+    field.addEventListener('input', helperChanged);
     field.addEventListener('input', saveSoon);
     field.addEventListener('change', saveSettings);
   }

@@ -58,8 +58,12 @@ const PRIVATE_STORE_TIMEOUT_MS = 3000;
 function privateStore(mode, act) {
   return new Promise((resolve, reject) => {
     let over = false;
+    let underway = null;
     const end = (settle, value) => { if (!over) { over = true; clearTimeout(timer); settle(value); } };
-    const timer = setTimeout(() => end(reject, new Error('The private store did not answer')), PRIVATE_STORE_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      end(reject, new Error('The private store did not answer'));
+      try { if (underway) underway.abort(); } catch (err) { /* over already */ }
+    }, PRIVATE_STORE_TIMEOUT_MS);
     const opening = indexedDB.open(PRIVATE_DB, 1);
     opening.onupgradeneeded = () => opening.result.createObjectStore(PRIVATE_STORE);
     opening.onerror = () => end(reject, opening.error);
@@ -69,6 +73,7 @@ function privateStore(mode, act) {
       if (over) { db.close(); return; } // it answered too late
       try {
         const transaction = db.transaction(PRIVATE_STORE, mode);
+        underway = transaction;
         const request = act(transaction.objectStore(PRIVATE_STORE));
         transaction.oncomplete = () => { db.close(); end(resolve, request.result); };
         transaction.onabort = () => { db.close(); end(reject, transaction.error); };
@@ -103,9 +108,6 @@ const inArea = (area, method, argument) => new Promise((resolve, reject) => {
 let helperSaved;
 let privateFailedAt = 0; // when the private store last failed or did not answer
 const PRIVATE_STORE_RETRY_MS = 30 * 1000;
-let helperInMemory = null; // the helper's settings when neither store nor session can hold them
-// What was given out for the helper while the private store could not be read (as JSON), or null.
-let shownWithoutStore = null;
 
 const readRecord = (store) => store.get(HELPER_SETTINGS_KEY);
 /** An operation on the private store, unless it failed a moment ago (see `PRIVATE_STORE_TIMEOUT_MS`). */
@@ -113,56 +115,85 @@ function privateStoreNow(mode, act) {
   if (Date.now() - privateFailedAt < PRIVATE_STORE_RETRY_MS) return Promise.reject(new Error('The private store failed a moment ago'));
   return privateStore(mode, act).catch((err) => { privateFailedAt = Date.now(); throw err; });
 }
+/** The private store's record, `{ values }`; rejects when the store cannot be read. */
+async function storeRecord() {
+  if (!helperSaved) helperSaved = { values: (await privateStoreNow('readonly', readRecord)) || null };
+  return helperSaved;
+}
+async function writeRecord(values) {
+  await privateStoreNow('readwrite', (store) => store.put(values, HELPER_SETTINGS_KEY));
+  helperSaved = { values };
+}
+
+// Something noted for want of the private store, in `chrome.storage.session` and, when that
+// cannot hold it, in this worker's memory: `{ value, kept }` ('session' or 'memory'), or null.
+// Read once per worker, since only this worker writes it.
+const noted = {};
+async function readNote(key) {
+  if (noted[key] === undefined) {
+    try {
+      const found = await inArea(sessionArea(), 'get', [key]);
+      noted[key] = Object.prototype.hasOwnProperty.call(found, key) ? { value: found[key], kept: 'session' } : null;
+    } catch (err) { noted[key] = null; }
+  }
+  return noted[key];
+}
+async function writeNote(key, value) {
+  try {
+    await inArea(sessionArea(), 'set', { [key]: value });
+    noted[key] = { value, kept: 'session' };
+  } catch (err) { noted[key] = { value, kept: 'memory' }; }
+  return noted[key].kept;
+}
+async function clearNote(key) {
+  if (noted[key] === null) return;
+  noted[key] = null;
+  try { await inArea(sessionArea(), 'remove', key); } catch (err) { /* it was in memory */ }
+}
+// The helper's settings as last saved, when the private store did not take them. They are the
+// newest, so they come before the store's record, and are written to the store when it works
+// again.
+const UNSAVED_KEY = HELPER_SETTINGS_KEY;
+// That settings saved by an earlier version are still to be moved (see `settleEarlier`).
+const MOVE_KEY = 'helper_settings_move';
 
 /**
  * The helper's settings as saved (null when none are), and where they were read from: 'saved'
- * (the private store), 'session' or 'memory' (as `writeHelperSettings` resolves to).
+ * (the private store), 'session' or 'memory' (saved there for want of it, as
+ * `writeHelperSettings` resolves to), or 'unread' when the store could not be read and nothing
+ * was saved meanwhile: there may be settings, and what they are is not known.
  */
 async function readHelperSettings() {
-  if (!helperSaved) {
+  const unsaved = await readNote(UNSAVED_KEY);
+  if (unsaved) {
     try {
-      helperSaved = { values: (await privateStoreNow('readonly', readRecord)) || null };
+      await writeRecord(unsaved.value);
+      await clearNote(UNSAVED_KEY);
     } catch (err) {
-      try {
-        return { values: (await inArea(sessionArea(), 'get', [HELPER_SETTINGS_KEY]))[HELPER_SETTINGS_KEY] || null, kept: 'session' };
-      } catch (err2) {
-        return { values: helperInMemory, kept: 'memory' };
-      }
+      return { values: unsaved.value, kept: unsaved.kept };
     }
   }
-  return { values: helperSaved.values, kept: 'saved' };
+  try {
+    return { values: (await storeRecord()).values, kept: 'saved' };
+  } catch (err) {
+    return { values: null, kept: 'unread' };
+  }
 }
-
-/** The helper's settings as a page is given them, as text to compare. */
-const helperView = (values) => JSON.stringify(pick(Object.assign({}, DEFAULT_SETTINGS, values), HELPER_SETTINGS));
 
 /**
  * Saves the helper's settings. Resolves to how long they are kept: 'saved' (for good),
  * 'session' (until the browser closes) or 'memory' (until this worker stops, which a browser
- * makes it do after a short while without use).
+ * makes it do after a short while without use). Kept either of those ways, they are still what
+ * is read from then on, and go to the private store once it takes them.
  */
 async function writeHelperSettings(values) {
+  await clearNote(MOVE_KEY); // what is saved now is newer than anything still to be moved
   try {
-    if (!helperSaved && shownWithoutStore !== null) {
-      // The page saving these was shown the settings while the private store could not be
-      // read. It saves all of them at every change, so if the store can be read now and has a
-      // record, and the helper's settings come back as they were shown, nobody changed them:
-      // the record stays, rather than be replaced by what was shown for want of it.
-      helperSaved = { values: (await privateStoreNow('readonly', readRecord)) || null };
-      if (helperSaved.values && helperView(values) === shownWithoutStore) return 'saved';
-    }
-    await privateStoreNow('readwrite', (store) => store.put(values, HELPER_SETTINGS_KEY));
-    helperSaved = { values };
-    shownWithoutStore = null;
+    await writeRecord(values);
+    await clearNote(UNSAVED_KEY);
     return 'saved';
   } catch (err) {
-    try {
-      await inArea(sessionArea(), 'set', { [HELPER_SETTINGS_KEY]: values });
-      return 'session';
-    } catch (err2) {
-      helperInMemory = values;
-      return 'memory';
-    }
+    return writeNote(UNSAVED_KEY, values);
   }
 }
 
@@ -179,54 +210,92 @@ const inTurn = (work) => {
 };
 
 /**
- * Get stored settings merged with defaults.
+ * What to do with settings for the helper found in `chrome.storage.local` (`earlier`), where a
+ * version of the extension before this one kept them, and where a page's script may be able
+ * to write. They are moved to the private store only when the extension has just been updated
+ * (`runtime.onInstalled`, noted under `MOVE_KEY`) and the private store has no record yet:
+ * that is the one moment they can be ours. The store gets a record then, an empty one after
+ * an installation, so later updates move nothing. At any other time they are never used.
+ * Resolves to `{ moved, remove }`: the settings that were moved, if any, and whether those in
+ * `chrome.storage.local` are to be removed now. They stay while a move is still to be made
+ * (the store failed: it is tried again), and while the store is empty and nothing says an
+ * update is under way (the event may be about to come).
  */
-function getSettings() {
+async function settleEarlier(earlier) {
+  const move = await readNote(MOVE_KEY);
+  let record;
+  try {
+    record = await storeRecord();
+  } catch (err) {
+    return { moved: null, remove: !move };
+  }
+  if (record.values) {
+    await clearNote(MOVE_KEY);
+    return { moved: null, remove: true };
+  }
+  if (!move) return { moved: null, remove: false };
+  try {
+    const values = move.value === 'update' ? earlier : {};
+    await writeRecord(values);
+    await clearNote(MOVE_KEY);
+    return { moved: values, remove: true };
+  } catch (err) {
+    helperSaved = undefined;
+    return { moved: null, remove: false };
+  }
+}
+
+/** The settings merged with defaults, and where the helper's were read from (see `readHelperSettings`). */
+function readSettings() {
   return inTurn(async () => {
     const stored = await inArea(chrome.storage.local, 'get', [SETTINGS_KEY, LEGACY_SETTINGS_KEY]).catch(() => ({}));
     let saved = stored[SETTINGS_KEY];
     // One-time migration from the extension's former name ("Verso").
-    const legacy = !saved && stored[LEGACY_SETTINGS_KEY];
-    if (legacy) saved = legacy;
+    if (!saved && stored[LEGACY_SETTINGS_KEY]) {
+      saved = stored[LEGACY_SETTINGS_KEY];
+      await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: saved }).catch(() => {});
+      await inArea(chrome.storage.local, 'remove', LEGACY_SETTINGS_KEY).catch(() => {});
+    }
     let { values: helper, kept } = await readHelperSettings();
-    // Settings saved by a version that kept the helper's with the others are moved to the
-    // private store, once: the first time the private store is read and found empty, it gets
-    // what is here for the helper, or nothing, and from then on it has a record. After that,
-    // and whenever the private store cannot be read (so that nothing says whether that first
-    // time is past), what is found here for the helper is not ours (a page's script may have
-    // written it) and is only removed.
-    const stray = pick(saved, HELPER_SETTINGS);
-    let moved = true;
-    if (kept === 'saved' && !helper) {
-      try {
-        await privateStoreNow('readwrite', (store) => store.put(stray, HELPER_SETTINGS_KEY));
-        helper = stray;
-        helperSaved = { values: helper };
-      } catch (err) {
-        // The store was read and then failed: what is here stays for the next read to move.
-        helperSaved = undefined;
-        moved = false;
+    const earlier = pick(saved, HELPER_SETTINGS);
+    if (Object.keys(earlier).length || await readNote(MOVE_KEY)) {
+      const { moved, remove } = await settleEarlier(earlier);
+      if (moved) { helper = moved; kept = 'saved'; }
+      if (remove && Object.keys(earlier).length) {
+        await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: without(saved, HELPER_SETTINGS) }).catch(() => {});
       }
     }
-    if (kept !== 'saved') shownWithoutStore = helperView(helper);
-    if (Object.keys(stray).length) saved = without(saved, HELPER_SETTINGS);
-    if (moved && (legacy || Object.keys(stray).length)) {
-      await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: saved }).catch(() => {});
-      if (legacy) await inArea(chrome.storage.local, 'remove', LEGACY_SETTINGS_KEY).catch(() => {});
-    }
-    return Object.assign({}, DEFAULT_SETTINGS, saved || {}, pick(helper, HELPER_SETTINGS));
+    return { settings: Object.assign({}, DEFAULT_SETTINGS, without(saved, HELPER_SETTINGS), pick(helper, HELPER_SETTINGS)), helperKept: kept };
   });
 }
 
-// The settings are read once as the worker starts, so that the private store has its record
-// (see `getSettings`) from the moment the extension is installed or updated, before any page.
-Promise.resolve().then(getSettings).catch(() => {});
+/**
+ * Get stored settings merged with defaults.
+ */
+const getSettings = () => readSettings().then((read) => read.settings);
 
-/** Save the settings: the helper's privately, the others in `chrome.storage.local`. */
+// Installed or updated: note it, for the one move of settings an update may make (see
+// `settleEarlier`), and read the settings, which makes it.
+try {
+  chrome.runtime.onInstalled.addListener((details) => {
+    if (!details || (details.reason !== 'install' && details.reason !== 'update')) return;
+    inTurn(() => writeNote(MOVE_KEY, details.reason)).then(readSettings).catch(() => {});
+  });
+} catch (err) { /* no such event here */ }
+
+/**
+ * Save the settings: the helper's privately, the others in `chrome.storage.local`. A page that
+ * was not shown the helper's settings (they could not be read) and did not change them sends
+ * none, and those saved are left as they are. Resolves to how long the helper's are kept (see
+ * `writeHelperSettings`), or undefined when none were sent.
+ */
 function setSettings(settings) {
   return inTurn(async () => {
-    const kept = await writeHelperSettings(pick(settings, HELPER_SETTINGS));
-    await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: without(settings, HELPER_SETTINGS) }).catch(() => {});
+    const helper = pick(settings, HELPER_SETTINGS);
+    const kept = Object.keys(helper).length ? await writeHelperSettings(helper) : undefined;
+    // (What `chrome.storage.local` has for the helper stays as it is: see `settleEarlier`.)
+    const stored = await inArea(chrome.storage.local, 'get', [SETTINGS_KEY]).catch(() => ({}));
+    await inArea(chrome.storage.local, 'set', { [SETTINGS_KEY]: Object.assign(without(settings, HELPER_SETTINGS), pick(stored[SETTINGS_KEY], HELPER_SETTINGS)) }).catch(() => {});
     return kept;
   });
 }
@@ -1720,13 +1789,18 @@ const MESSAGE_HANDLERS = {
   },
   // The settings. Pages on GitHub get them without the helper's token, which only the worker
   // itself needs.
+  // The extension's pages are also told where the helper's settings were read from: when
+  // that is 'unread', they are not known, and a page does not send back the ones it was shown.
   GET_SETTINGS: async (request, sender) => {
-    const settings = await getSettings();
-    if (!fromExtensionPage(sender)) delete settings.helperToken;
-    return { success: true, settings, stats: queryStats };
+    const { settings, helperKept } = await readSettings();
+    if (!fromExtensionPage(sender)) {
+      delete settings.helperToken;
+      return { success: true, settings, stats: queryStats };
+    }
+    return { success: true, settings, helperKept, stats: queryStats };
   },
-  // `helperKept` says how long the helper's settings last: 'saved', or 'session' or 'memory'
-  // where the browser gives the extension no lasting private place (see `writeHelperSettings`).
+  // `helperKept` says how long the helper's settings last, when some were sent: 'saved', or
+  // 'session' or 'memory' when the private store did not take them (see `writeHelperSettings`).
   SET_SETTINGS: async (request) => ({ success: true, helperKept: await setSettings(request.settings || {}) }),
   CLEAR_CACHE: () => new Promise((resolve) => {
     memoryCache.clear();

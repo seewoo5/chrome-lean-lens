@@ -66,6 +66,8 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.runtime.sendMessage({ action: "GET_SETTINGS" }, (res) => {
       const current = res?.settings || {};
       current.enabled = isEnabled;
+      // (The helper's settings, when they could not be read, are not this page's to save.)
+      if (res?.helperKept === 'unread') for (const key of ['enableHelper', 'helperUrl', 'helperToken']) delete current[key];
       chrome.runtime.sendMessage({ action: "SET_SETTINGS", settings: current }, () => {
         // Notify active tab
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
