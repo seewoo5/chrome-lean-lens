@@ -3391,6 +3391,55 @@ console.log("23. Testing the file outline, #where and placement hints...");
 }
 console.log("   ✓ Outline, #where and placement hints verified.\n");
 
+// 24. The commits a pull request's page names: only what is said of that pull request counts.
+console.log("24. Testing the commits a pull request's page names...");
+{
+  const scripts = [];
+  const rctx = {
+    console, setTimeout, clearTimeout, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, location: { pathname: '' },
+    document: { querySelectorAll: () => scripts }
+  };
+  rctx.window = rctx; rctx.self = rctx;
+  vm.createContext(rctx);
+  for (const f of ['content/lean_tokenizer.js', 'content/lean_terms.js', 'content/binder_context.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'), rctx);
+  }
+  // The page at `pathname`, holding these JSON scripts. (Another page first: the answer is kept per pull request.)
+  const revisionAt = (pathname, ...payloads) => {
+    rctx.location.pathname = '/_/_/pull/0';
+    scripts.length = 0;
+    rctx.VersoBinderContext.pageRevision();
+    rctx.location.pathname = pathname;
+    payloads.forEach((p) => scripts.push({ textContent: typeof p === 'string' ? p : JSON.stringify(p) }));
+    const rev = rctx.VersoBinderContext.pageRevision();
+    return [rev.head, rev.base];
+  };
+  const H437 = 'b'.repeat(40);
+  const H460 = '8'.repeat(40);
+  const BASE = '7'.repeat(40);
+  // A pull request's conversation page, as GitHub embeds it: the pull request's own object.
+  const conversation = (number, head) => ({
+    payload: { pullRequest: { baseBranch: 'main', baseSha: BASE, headSha: head, number, title: 't' } },
+    urls: { changes: `/o/r/pull/${number}/changes` }
+  });
+  assert.deepStrictEqual(revisionAt('/o/r/pull/437', conversation(437, H437)), [H437, BASE]);
+  // On PR 460 after PR 437's page, moved between inside GitHub: what is left of PR 437 is not PR 460's.
+  // (Its diff page names no commit: the background asks GitHub.)
+  assert.deepStrictEqual(revisionAt('/o/r/pull/460/changes', conversation(437, H437)), [null, null], 'left from the page before');
+  assert.deepStrictEqual(revisionAt('/o/r/pull/460', conversation(437, H437), conversation(460, H460)), [H460, BASE]);
+  // A commit inside the pull request's object is its own; one inside another pull request's is not.
+  assert.deepStrictEqual(revisionAt('/o/r/pull/12', { pullRequest: { number: 12, comparison: { headOid: H460, baseOid: BASE } } }), [H460, BASE]);
+  assert.deepStrictEqual(revisionAt('/o/r/pull/12', { pullRequest: { number: 12, linked: [{ number: 13, headRefOid: H437 }] } }), [null, null]);
+  assert.deepStrictEqual(revisionAt('/o/r/pull/12', { pullRequest: { number: '12', headRefOid: H460 } }), [H460, null], 'a number given as text');
+  // With no number around it, a commit counts only where the data names this pull request's page.
+  assert.deepStrictEqual(revisionAt('/O/R/pull/12/files', { route: '/o/r/pull/12/files', headRefOid: H460 }), [H460, null]);
+  assert.deepStrictEqual(revisionAt('/o/r/pull/12/files', { route: '/o/r/pull/120/files', headRefOid: H460 }), [null, null], '/pull/120 is not /pull/12');
+  // Not JSON, or not a pull request's page: nothing.
+  assert.deepStrictEqual(revisionAt('/o/r/pull/12', `{"route":"/o/r/pull/12","headOid":"${H460}"`), [null, null]);
+  assert.deepStrictEqual(revisionAt('/o/r/blob/main/A.lean', conversation(437, H437)), [null, null]);
+  console.log("   ✓ Pull request commits verified.\n");
+}
+
 Promise.all(asyncChecks).then(() => {
   console.log("   ✓ Rewrite replay verified.\n");
   console.log("==================================================");

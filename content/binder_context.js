@@ -1578,20 +1578,65 @@
 
   let revisionCache = { key: null, head: null, base: null };
 
-  /** Head/base commit of the PR on this page, from GitHub's embedded JSON (null if absent). */
+  /**
+   * Head/base commit of the PR on this page, from GitHub's embedded JSON (null where the page
+   * does not say; the background then asks GitHub). Only what is said of this PR counts: after
+   * moving from one pull request to another inside GitHub, the page can still hold the data of
+   * the one shown before, and a page can name other pull requests too.
+   */
   function pageRevision() {
     const key = location.pathname.split('/').slice(0, 5).join('/');
     if (revisionCache.key === key) return revisionCache;
+    const m = location.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    const pr = m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
     let head = null;
     let base = null;
-    for (const sc of document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]')) {
-      const t = sc.textContent || '';
-      if (!head) head = (t.match(/"head(?:Oid|Sha|RefOid)"\s*:\s*"([0-9a-f]{40})"/) || [])[1] || null;
-      if (!base) base = (t.match(/"base(?:Oid|Sha|RefOid)"\s*:\s*"([0-9a-f]{40})"/) || [])[1] || null;
+    for (const sc of pr ? document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]') : []) {
+      const said = revisionIn(sc.textContent || '', pr);
+      head = head || said.head;
+      base = base || said.base;
       if (head && base) break;
     }
     revisionCache = { key, head, base };
     return revisionCache;
+  }
+
+  const COMMIT_KEYS = { head: ['headOid', 'headSha', 'headRefOid'], base: ['baseOid', 'baseSha', 'baseRefOid'] };
+  const commitAt = (obj, side) => {
+    for (const k of COMMIT_KEYS[side]) if (typeof obj[k] === 'string' && /^[0-9a-f]{40}$/.test(obj[k])) return obj[k];
+    return null;
+  };
+
+  /**
+   * The head and base commits that a JSON text gives the pull request `pr` (`{owner, repo,
+   * number}`), each null when it gives none. An object with a commit is about the pull request
+   * whose `number` it has, or else the nearest object around it has; with no number anywhere
+   * around it, about this one only if the text names this pull request's page.
+   */
+  function revisionIn(text, pr) {
+    const out = { head: null, base: null };
+    if (!/"(?:head|base)(?:Oid|Sha|RefOid)"/.test(text)) return out;
+    let data;
+    try { data = JSON.parse(text); } catch (err) { return out; }
+    // (`/o/r/pull/46` is not named by `/o/r/pull/460`.)
+    const page = `/${pr.owner}/${pr.repo}/pull/${pr.number}`.toLowerCase();
+    const lower = text.toLowerCase();
+    let at = lower.indexOf(page);
+    while (at >= 0 && /[0-9]/.test(lower[at + page.length] || '')) at = lower.indexOf(page, at + 1);
+    const namesPage = at >= 0;
+    const walk = (node, number, depth) => {
+      if (!node || typeof node !== 'object' || depth > 64 || (out.head && out.base)) return;
+      if (Array.isArray(node)) { node.forEach((item) => walk(item, number, depth + 1)); return; }
+      const own = Number.isInteger(node.number) ? node.number
+        : typeof node.number === 'string' && /^\d+$/.test(node.number) ? Number(node.number) : number;
+      if (own === pr.number || (own === null && namesPage)) {
+        out.head = out.head || commitAt(node, 'head');
+        out.base = out.base || commitAt(node, 'base');
+      }
+      for (const value of Object.values(node)) walk(value, own, depth + 1);
+    };
+    walk(data, null, 0);
+    return out;
   }
 
   function filePathFor(el) {
