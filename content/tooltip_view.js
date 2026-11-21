@@ -12,8 +12,52 @@
       this.currentData = null;
       this.currentExtras = null;
       this.hideTimer = null;
+      // Where hovers are shown instead of beside the code (the bottom of the infoview's panel), or null.
+      this.dock = null;
+      // The code the hover shown is about, and whether the card is only a lookup's spinner.
+      this.shownShade = null;
+      this.loadingCard = false;
       this.initDOM();
       this.bindEvents();
+    }
+
+    /**
+     * Show hovers in `el` (the bottom of the infoview's panel) instead of beside the code; with
+     * no `el`, beside the code again. Docked, a hover stays until another one replaces it:
+     * moving the pointer away does not close it, and a spot with nothing to show leaves it as
+     * it is. Only Esc, the close button, or leaving the page clears it.
+     */
+    dockIn(el) {
+      el = el || null;
+      if (el === this.dock) return;
+      const shown = this.isVisible() && !this.loadingCard;
+      this.clearHideTimer();
+      if (this.dock) this.dock.classList.remove('verso-dock-filled');
+      this.dock = el;
+      this.container.classList.toggle('verso-docked', Boolean(el));
+      this.container.classList.remove('verso-loading');
+      const card = this.container.querySelector('.verso-tooltip-card');
+      if (card && card.style) card.style.maxHeight = '';
+      this.container.style.left = '';
+      this.container.style.top = '';
+      (el || document.body).appendChild(this.container);
+      const pinBtn = this.container.querySelector('#verso-pin-btn');
+      const closeBtn = this.container.querySelector('#verso-close-btn');
+      if (pinBtn) pinBtn.title = el ? 'Keep this hover while the pointer moves on (Alt)' : 'Pin tooltip (Alt)';
+      if (closeBtn) closeBtn.title = el ? 'Clear (Esc)' : 'Close (Esc)';
+      if (el && shown) {
+        // The hover open beside the code moves into the panel, laid out for it.
+        this.renderExtras(this.currentExtras);
+        this.syncDock();
+      } else {
+        // Out of the panel, its hover goes: there is no place beside the code to put it.
+        this.hide(true);
+      }
+    }
+
+    /** Tell the dock whether it holds a hover (it shows a hint while it does not). */
+    syncDock() {
+      if (this.dock) this.dock.classList.toggle('verso-dock-filled', this.isVisible());
     }
 
     /**
@@ -171,13 +215,16 @@
 
       // Keyboard handler (Esc to dismiss, Alt to toggle pin, ← → to step through a proof)
       window.addEventListener('keydown', (e) => {
+        const typing = Boolean(e.target && e.target.closest && e.target.closest('input, textarea, [contenteditable="true"]'));
+        // Docked, a hover is nearly always shown: keys typed in a text field (Esc to leave a
+        // comment, Option for a symbol) are the field's.
+        if (this.dock && typing) return;
         if (e.key === 'Escape' && this.isVisible()) {
           this.hide(true);
         } else if (e.key === 'Alt' && this.isVisible()) {
           this.togglePin();
         } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && this.isVisible() && this.isPinned &&
-          this.currentExtras && this.currentExtras.stepper && !e.altKey && !e.metaKey && !e.ctrlKey &&
-          !(e.target && e.target.closest && e.target.closest('input, textarea, [contenteditable="true"]'))) {
+          this.currentExtras && this.currentExtras.stepper && !e.altKey && !e.metaKey && !e.ctrlKey && !typing) {
           e.preventDefault();
           this.step(e.key === 'ArrowLeft' ? -1 : 1);
         }
@@ -213,6 +260,9 @@
       this.currentData = data;
       this.goalsSide = 'after';
       this.setShade(shade);
+      this.shownShade = shade || null;
+      this.loadingCard = false;
+      this.container.classList.remove('verso-loading');
 
       const titleEl = this.container.querySelector('#verso-title');
       const kindEl = this.container.querySelector('#verso-kind');
@@ -319,7 +369,16 @@
       // Position tooltip near hovered element (shown first, so its height can be measured)
       this.container.classList.remove('verso-hidden');
       this.container.classList.add('verso-visible');
-      if (inPlace) this.keepPlace(); else this.positionTooltip(boundingRect);
+      if (this.dock) {
+        // Docked, a new hover is read from its top; stepping through a proof keeps the place.
+        const body = this.container.querySelector('.verso-body');
+        if (body && !inPlace) body.scrollTop = 0;
+        this.syncDock();
+      } else if (inPlace) {
+        this.keepPlace();
+      } else {
+        this.positionTooltip(boundingRect);
+      }
     }
 
     /**
@@ -346,9 +405,10 @@
       }
 
       // Two columns when there is a proof state beside a definition: the state on the left, the
-      // definition on the right (one column on a narrow window, or for a proof state alone).
+      // definition on the right (one column on a narrow window, or for a proof state alone, or
+      // in the infoview's panel, which is narrow).
       const wide = (typeof window !== 'undefined' && window.innerWidth) || 1024;
-      const twoColumns = Boolean(goals) && !(this.currentData && this.currentData.bare) && wide >= 720;
+      const twoColumns = Boolean(goals) && !(this.currentData && this.currentData.bare) && wide >= 720 && !this.dock;
       this.container.classList.toggle('verso-two-col', twoColumns);
 
       const messages = (extras && extras.messages) || [];
@@ -359,12 +419,15 @@
       messagesEl.classList.toggle('verso-hidden', messages.length === 0);
 
       const helper = extras && extras.helper;
-      const estimated = this.currentData && this.currentData.source !== 'lean';
-      const status = helper ? this.helperStatus(helper, estimated) : null;
+      const estimated = Boolean(this.currentData) && this.currentData.source !== 'lean';
+      // In the infoview's panel, Lean is started and stopped at the top: the hover says only
+      // whether it was estimated, and offers no run of its own.
+      const status = this.dock ? (estimated ? { text: 'Estimated: not checked by Lean' } : null)
+        : helper ? this.helperStatus(helper, estimated) : null;
       if (status) {
         barText.textContent = status.text;
         barBtn.textContent = status.button || '';
-        barBtn.classList.toggle('verso-hidden', !status.button || typeof helper.run !== 'function');
+        barBtn.classList.toggle('verso-hidden', !status.button || !helper || typeof helper.run !== 'function');
         bar.classList.remove('verso-hidden');
       } else {
         bar.classList.add('verso-hidden');
@@ -486,6 +549,13 @@
     showLoading(token, boundingRect, shade) {
       this.clearHideTimer();
       this.setShade(shade);
+      if (this.dock && this.isVisible() && !this.loadingCard) {
+        // Docked, the hover shown stays until the next one is ready; a bar says one is coming.
+        this.container.classList.add('verso-loading');
+        return;
+      }
+      this.loadingCard = true;
+      this.currentData = null;
       const titleEl = this.container.querySelector('#verso-title');
       const kindEl = this.container.querySelector('#verso-kind');
       const sigEl = this.container.querySelector('#verso-signature');
@@ -506,13 +576,14 @@
       this.positionTooltip(boundingRect);
       this.container.classList.remove('verso-hidden');
       this.container.classList.add('verso-visible');
+      this.syncDock();
     }
 
     /**
      * Calculate optimal position for tooltip avoiding viewport boundaries and cursor overlap.
      */
     positionTooltip(rect) {
-      if (!rect) return;
+      if (!rect || this.dock) return;
       const card = this.container.querySelector('.verso-tooltip-card');
       const cardWidth = (card && card.offsetWidth) || 440;
       const viewportWidth = window.innerWidth;
@@ -552,6 +623,7 @@
      * to make room for its widest, and scrolls when it is taller than the room below its top.
      */
     keepPlace() {
+      if (this.dock) return;
       const left = parseFloat(this.container.style.left);
       const top = parseFloat(this.container.style.top);
       if (!Number.isFinite(left) || !Number.isFinite(top)) return;
@@ -592,7 +664,8 @@
      * Schedule closing the tooltip with debounce.
      */
     scheduleHide(delay = 200) {
-      if (this.isPinned) return;
+      // (Docked, a hover stays when the pointer moves away.)
+      if (this.isPinned || this.dock) return;
       this.clearHideTimer();
       this.hideTimer = setTimeout(() => {
         this.hide(false);
@@ -615,13 +688,23 @@
     hide(force = false) {
       if (this.isPinned && !force) return;
       this.clearHideTimer();
+      if (this.dock && !force && this.isVisible() && !this.loadingCard) {
+        // Docked: a spot with nothing to show leaves the hover shown, and its code shaded.
+        this.container.classList.remove('verso-loading');
+        this.setShade(this.shownShade);
+        return;
+      }
       this.setShade(null);
+      this.shownShade = null;
+      this.loadingCard = false;
       this.isPinned = false;
       const pinBtn = this.container.querySelector('#verso-pin-btn');
       pinBtn?.classList.remove('verso-btn-active');
       this.container.classList.remove('verso-pinned');
+      this.container.classList.remove('verso-loading');
       this.container.classList.remove('verso-visible');
       this.container.classList.add('verso-hidden');
+      this.syncDock();
     }
 
     /**

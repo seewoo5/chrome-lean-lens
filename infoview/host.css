@@ -1,0 +1,53 @@
+/* The page around the infoview: Lean's state for this page, and the button that starts it. */
+html, body { height: 100%; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+}
+body.light { --bg: #ffffff; --text: #1f2328; --muted: #59636e; --border: #d1d9e0; --bar: #f6f8fa; --accent: #1f883d; --accent-text: #ffffff; --warn-bg: #fff8c5; color-scheme: light; }
+body.dark { --bg: #0d1117; --text: #e6edf3; --muted: #9198a1; --border: #3d444d; --bar: #151b23; --accent: #238636; --accent-text: #ffffff; --warn-bg: #3a2d00; color-scheme: dark; }
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  min-height: 20px;
+}
+#status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+#dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #8c959f; }
+#dot.ready { background: #2da44e; }
+#dot.busy { background: #bf8700; animation: pulse 1.2s ease-in-out infinite; }
+#dot.error { background: #cf222e; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+button {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+#start { padding: 5px 14px; font-weight: 600; background: var(--accent); color: var(--accent-text); border-color: transparent; }
+
+#notice { padding: 6px 10px; font-size: 12px; background: var(--warn-bg); border-bottom: 1px solid var(--border); }
+#intro { padding: 14px 12px; }
+#intro p { margin: 0 0 10px; }
+.muted { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
+#frame-holder { flex: 1; min-height: 0; }
+#frame-holder iframe { width: 100%; height: 100%; border: 0; display: block; }

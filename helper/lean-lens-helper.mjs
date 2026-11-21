@@ -11,6 +11,9 @@
 //   node lean-lens-helper.mjs clean [--all]
 //   node lean-lens-helper.mjs --codespaces        Lean runs in GitHub Codespaces, not here
 //
+// For the extension's infoview it also keeps Lean's language server running on a commit, once
+// the reader has started it there (see live.mjs).
+//
 // Elaborating a Lean file runs the code in it. The helper therefore only works on repositories
 // you have allowed, only when asked with its token, and never on its own initiative. On macOS
 // that code runs in a sandbox: no network, no access to your files (see `seatbeltProfile`).
@@ -32,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { DATA_FORMAT_VERSION, convertModule } from './convert.mjs';
+import { LIVE_VERSION, createLive, createLiveRelay } from './live.mjs';
 
 export const HELPER_VERSION = 1;
 export const DEFAULT_PORT = 5326;
@@ -543,9 +547,9 @@ export async function cleanCache(cacheDir, { results = false, force = false, bui
 
 /**
  * @param {object} options `{cacheDir, buildsDir, jobs, subverso, subversoRev, cloneBase, sandbox,
- *   keepBuilds, tidyMinutes, log}`; and `detectSandbox`, which stands in for the check of what
+ *   keepBuilds, tidyMinutes, lake, log}`; and `detectSandbox`, which stands in for the check of what
  *   this system can confine a command with (the tests give its answer).
- * @returns `{config, allow, link, start, status, fileState, readData, handle, sandbox, idle, shutdown}`
+ * @returns `{config, allow, link, start, status, fileState, readData, handle, sandbox, live, relay, idle, shutdown}`
  */
 export function createHelper(options = {}) {
   const cacheDir = path.resolve(options.cacheDir || defaultCacheDir());
@@ -625,7 +629,8 @@ export function createHelper(options = {}) {
   // run Lean again, so it goes once it has not been used for a while, and when the helper
   // stops. What stays is the results, some hundred kilobytes for each Lean file.
 
-  const active = new Map(); // repo → runs queued or under way
+  const active = new Map(); // repo → runs queued or under way, and sessions of Lean's server
+  let stopping = false;
   const tidyTimers = new Map(); // repo → the timer that will remove its copy
   const owned = new Set(); // repositories whose copy this helper is using
 
@@ -663,7 +668,7 @@ export function createHelper(options = {}) {
   function tidyWhenIdle(repo) {
     clearTimeout(tidyTimers.get(repo));
     tidyTimers.delete(repo);
-    if (away(repo) ? keepCodespaces : keepBuilds) return;
+    if (stopping || (away(repo) ? keepCodespaces : keepBuilds)) return;
     const why = tidyMinutes ? `not used for ${tidyMinutes} minute${tidyMinutes === 1 ? '' : 's'}` : 'its run is over';
     const discard = () => {
       tidyTimers.delete(repo);
@@ -705,6 +710,9 @@ export function createHelper(options = {}) {
 
   /** Stop what is running, and remove what only a running helper needs. */
   function shutdown() {
+    stopping = true;
+    live.shutdown();
+    if (relay) relay.shutdown();
     for (const timer of tidyTimers.values()) clearTimeout(timer);
     tidyTimers.clear();
     stopCommands();
@@ -811,9 +819,15 @@ export function createHelper(options = {}) {
    * only the Lean toolchain and the paths given, write only where told, and reach the network
    * only when `network` is set.
    */
-  async function untrusted(command, args, { cwd, toolchain, scratch, network = false, readable = [], writable = [], env: extra = {}, onLine, timeoutMs } = {}) {
+  async function untrusted(command, args, options = {}) {
+    const how = await confined(command, args, options);
+    return run(how.command, how.args, { cwd: how.cwd, env: how.env, onLine: options.onLine, timeoutMs: options.timeoutMs });
+  }
+
+  /** How such a command is started: `{command, args, cwd, env}`, with the sandbox around it where there is one. */
+  async function confined(command, args, { cwd, toolchain, scratch, network = false, readable = [], writable = [], env: extra = {} } = {}) {
     if (!sandboxWanted) {
-      return run(command, args, { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...extra }, onLine, timeoutMs });
+      return { command, args, cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...extra } };
     }
     const home = ownDir(path.join(scratch, 'home'));
     const temporary = ownDir(path.join(scratch, 'tmp'));
@@ -840,9 +854,9 @@ export function createHelper(options = {}) {
       guarded: allowed.map((target) => path.join(target, '.git')),
     };
     if (confinement === 'bwrap') {
-      return run('bwrap', [...bwrapArgs({ ...limits, cwd: cwd ? realOrSame(cwd) : null }), '--', command, ...args], { cwd, env, onLine, timeoutMs });
+      return { command: 'bwrap', args: [...bwrapArgs({ ...limits, cwd: cwd ? realOrSame(cwd) : null }), '--', command, ...args], cwd, env };
     }
-    return run('/usr/bin/sandbox-exec', ['-p', seatbeltProfile(limits), command, ...args], { cwd, env, onLine, timeoutMs });
+    return { command: '/usr/bin/sandbox-exec', args: ['-p', seatbeltProfile(limits), command, ...args], cwd, env };
   }
 
   /**
@@ -856,6 +870,11 @@ export function createHelper(options = {}) {
    */
   async function resolveToolchain(root, job) {
     const name = toolchainOf(root);
+    // (A `lake` named when the helper was made stands in for every project's: the tests have one.)
+    if (options.lake) {
+      const lake = realOrSame(options.lake);
+      return { lake, bin: path.dirname(lake), root: path.dirname(path.dirname(lake)) };
+    }
     // elan installs a missing version by itself, without a word, the moment it is asked about
     // it. So the helper looks first, says what is happening, and notes what it brought in.
     let elanIsThere = true;
@@ -1057,6 +1076,8 @@ export function createHelper(options = {}) {
       });
       return;
     }
+    // The copy is about to move to this run's commit: a server on another one stops first.
+    live.release(job.repo, job.sha);
     const workDir = scratchDir(randomBytes(6).toString('hex'));
     try {
       const dir = await ensureRepo(job, workDir);
@@ -1099,6 +1120,90 @@ export function createHelper(options = {}) {
     } finally {
       rmSync(workDir, GONE);
     }
+  }
+
+  // --- Lean's server, for the infoview (live.mjs) --------------------------------------------
+
+  /** Do something with a repository's copy once what is under way there is over. */
+  function queued(repo, work) {
+    const current = (repoQueues.get(repo) || Promise.resolve()).then(work);
+    repoQueues.set(repo, current.catch(() => { /* whoever asked hears of it */ }));
+    return current;
+  }
+
+  // A session uses the repository's copy for as long as it lasts: the copy stays meanwhile.
+  const inUse = (repo) => {
+    active.set(repo, (active.get(repo) || 0) + 1);
+    clearTimeout(tidyTimers.get(repo));
+    tidyTimers.delete(repo);
+  };
+  const unused = (repo) => {
+    active.set(repo, active.get(repo) - 1);
+    if (!active.get(repo)) tidyWhenIdle(repo);
+  };
+
+  const live = createLive({
+    log,
+    quietMs: (tidyMinutes || DEFAULT_TIDY_MINUTES) * 60 * 1000,
+    goneMs: options.liveGoneMs,
+    tickMs: options.liveTickMs,
+    deps: {
+      lakeRootFor,
+      begin: (job) => inUse(job.repo),
+      checkout: (job) => queued(job.repo, async () => {
+        job.workDir = scratchDir(randomBytes(6).toString('hex'));
+        const dir = await ensureRepo(job, job.workDir);
+        await checkout(dir, job);
+        job.dir = realOrSame(dir);
+      }),
+      project: (job, rootDir) => queued(job.repo, async () => {
+        const root = path.join(job.dir, rootDir);
+        // (As for a run: refused before anything is installed for it.)
+        if (sandboxWanted && !(await sandboxKind)) throw new Error(NO_SANDBOX);
+        const toolchain = await resolveToolchain(root, job);
+        await ensureDependencies(root, rootDir, toolchain, job, job.workDir);
+        return { root, rootDir, toolchain };
+      }),
+      // `lake serve` evaluates the lakefile and elaborates the files opened in it: confined like
+      // every run of the project's code, and without network.
+      async serve(job, project) {
+        const how = await confined(project.toolchain.lake, ['serve'], {
+          cwd: project.root, toolchain: project.toolchain, scratch: path.join(job.workDir, 'project'), writable: [job.dir],
+        });
+        const child = spawn(how.command, how.args, { cwd: how.cwd, env: how.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+        runningCommands.add(child);
+        child.on('error', () => runningCommands.delete(child));
+        child.on('close', () => runningCommands.delete(child));
+        return child;
+      },
+      stop: stopCommand,
+      finish(job) {
+        if (job.workDir) rmSync(job.workDir, GONE);
+        unused(job.repo);
+      },
+    },
+  });
+  // With Lean in a codespace, the server runs there and this helper passes the messages on.
+  const relay = remote ? createLiveRelay({ remote, log, begin: inUse, finish: unused, pollMaxMs: options.livePollMaxMs }) : null;
+
+  /** Answer a `/live/…` request: a promise of `{status, body}`. */
+  async function liveRequest(pathname, repo, sha, request) {
+    const json = (status, value) => ({ status, body: typeof value === 'string' ? value : JSON.stringify(value) });
+    const service = away(repo) ? relay : live;
+    if (pathname === '/live/open') {
+      if (!isLeanPath(request.path)) return json(400, { error: 'Bad file path' });
+      const pr = Number.isInteger(Number(request.pr)) && Number(request.pr) > 0 ? Number(request.pr) : null;
+      return json(200, service.open({ repo, sha, pr, path: request.path, restart: request.restart === true }));
+    }
+    const id = request.session;
+    if (typeof id !== 'string' || !id || id.length > 64) return json(400, { error: 'Bad session' });
+    if (pathname === '/live/poll') {
+      const rev = Number.isFinite(Number(request.rev)) && request.rev !== null && request.rev !== undefined ? Number(request.rev) : -1;
+      return json(200, await service.poll(id, { after: Number(request.after) || 0, rev, wait: Number(request.wait) || 0 }));
+    }
+    if (pathname === '/live/send') return json(200, await service.send(id, request.messages));
+    if (pathname === '/live/close') return json(200, service.close(id));
+    return json(404, { error: 'Unknown request' });
   }
 
   // --- What the extension asks for -----------------------------------------------------------
@@ -1165,7 +1270,10 @@ export function createHelper(options = {}) {
 
   const readData = (repo, sha, file) => readFileSync(dataFile(repo, sha, file), 'utf8');
 
-  /** Answer one request: `{status, body}` with `body` a JSON string. */
+  /**
+   * Answer one request: `{status, body}` with `body` a JSON string, or for a `/live/…` request
+   * (which may wait for Lean to say something) a promise of that.
+   */
   function handle(method, url, body) {
     const json = (status, value) => ({ status, body: typeof value === 'string' ? value : JSON.stringify(value) });
     const { pathname, searchParams } = new URL(url, 'http://127.0.0.1');
@@ -1173,7 +1281,7 @@ export function createHelper(options = {}) {
     if (method === 'GET' && pathname === '/status') {
       return json(200, {
         ok: true, name: 'lean-lens-helper', version: HELPER_VERSION, format: DATA_FORMAT_VERSION, allow: config.allow, sandbox: sandboxState,
-        runs: remote ? 'codespaces' : 'here',
+        runs: remote ? 'codespaces' : 'here', live: LIVE_VERSION,
       });
     }
     if (method === 'POST' && pathname === '/allow') {
@@ -1185,6 +1293,7 @@ export function createHelper(options = {}) {
     const sha = method === 'GET' ? searchParams.get('sha') : request.sha;
     if (!isRepo(repo) || !isSha(sha)) return json(400, { error: 'Bad repository or commit' });
     if (!config.allow.includes(repo)) return json(403, { state: 'not_allowed', repo });
+    if (method === 'POST' && pathname.startsWith('/live/')) return liveRequest(pathname, repo, sha, request);
     if (method === 'GET' && pathname === '/job') return json(200, status(repo, sha));
     if (method === 'POST' && pathname === '/run') {
       const paths = Array.isArray(request.paths) ? [...new Set(request.paths)] : [];
@@ -1206,7 +1315,7 @@ export function createHelper(options = {}) {
 
   sweep();
   // (`untrusted` is here for the tests: they check that it runs nothing without a sandbox.)
-  return { cacheDir, buildsDir, config, allow, link, start, status, fileState, readData, handle, poolSize, sandbox, keepBuilds, keepCodespaces, tidyMinutes, remote, idle, shutdown, untrusted };
+  return { cacheDir, buildsDir, config, allow, link, start, status, fileState, readData, handle, poolSize, sandbox, keepBuilds, keepCodespaces, tidyMinutes, remote, live, relay, idle, shutdown, untrusted };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1264,11 +1373,11 @@ export function serve(helper, port = DEFAULT_PORT) {
         send(400, JSON.stringify({ error: 'The request body is not JSON' }));
         return;
       }
+      const fail = (error) => send(500, JSON.stringify({ error: error.message }));
       try {
-        const result = helper.handle(request.method, request.url, body);
-        send(result.status, result.body);
+        Promise.resolve(helper.handle(request.method, request.url, body)).then((result) => send(result.status, result.body), fail);
       } catch (error) {
-        send(500, JSON.stringify({ error: error.message }));
+        fail(error);
       }
     });
   });

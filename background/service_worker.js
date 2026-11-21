@@ -25,6 +25,8 @@ const DEFAULT_SETTINGS = {
   helperToken: "",
   // The outline button beside a Lean file (declarations, `open`, `variable`, placement hints).
   showOutline: true,
+  // Lean's infoview in a panel beside the code, when the helper is in use.
+  showInfoview: true,
   theme: "auto"
 };
 
@@ -1593,9 +1595,10 @@ function localHelperUrl(url) {
  * One request to the helper. Resolves to its JSON answer, or to `{state}` when there is none:
  * 'off' (not set up), 'not_local' (its address is not on this machine), 'offline' (not
  * running), 'unauthorized' (wrong token), 'not_allowed' (the repository is not allowed yet),
- * 'error'.
+ * 'error'; and to `{state: missing}` when the helper does not know the request at all, if
+ * `missing` is given.
  */
-async function helperRequest(path, { body, settings, timeout = 6000 } = {}) {
+async function helperRequest(path, { body, settings, timeout = 6000, missing = null } = {}) {
   const s = settings || await getSettings();
   if (!s.enableHelper || !s.helperUrl || !s.helperToken) return { state: 'off' };
   if (!localHelperUrl(s.helperUrl)) return { state: 'not_local' };
@@ -1615,6 +1618,7 @@ async function helperRequest(path, { body, settings, timeout = 6000 } = {}) {
     if (res.status === 401) return { state: 'unauthorized' };
     const json = await res.json().catch(() => null);
     if (res.status === 403) return { state: 'not_allowed', repo: json && json.repo };
+    if (res.status === 404 && missing) return { state: missing };
     if (!res.ok || !json) return { state: 'error', error: (json && json.error) || `The helper answered ${res.status}` };
     return json;
   } catch (err) {
@@ -1762,6 +1766,66 @@ async function helperRun(request) {
 }
 
 /**
+ * A request of the infoview's panel to the helper, made here for it when the panel's own does not
+ * get through (see infoview/host.js). Only the panel's page may ask, and only for what it does
+ * itself: allowing a repository is its button's doing, and not something a page's content script
+ * may ask for.
+ */
+const PANEL_REQUESTS = new Set(['/allow', '/live/open', '/live/poll', '/live/send', '/live/close']);
+function helperForPanel(request, sender) {
+  const panel = chrome.runtime.getURL('infoview/host.html');
+  const from = (sender && sender.url) || '';
+  if (from !== panel && !from.startsWith(`${panel}#`)) return { state: 'error', error: 'Not asked by the infoview' };
+  if (!PANEL_REQUESTS.has(request.path) || !request.body || typeof request.body !== 'object') return { state: 'error', error: 'Unknown request' };
+  const timeout = Math.min(Math.max(Number(request.timeout) || 8000, 1000), 40000);
+  return helperRequest(request.path, { body: request.body, timeout, missing: 'old' });
+}
+
+// How the infoview's panel was left (content/infoview_panel.js): open or hidden, how wide, and how
+// tall the hovers under it. The content script, in GitHub's page, does not reach the extension's
+// storage (see `setAccessLevel` below), so it is kept here for it: these three values and
+// nothing else, whatever is sent.
+const INFOVIEW_PANEL_KEY = 'lean_lens_infoview_panel';
+function infoviewPanel(state) {
+  const size = (value) => (typeof value === 'number' && value > 0 && value < 100000 ? Math.round(value) : null);
+  const plain = (kept) => (kept && typeof kept === 'object' ? { open: kept.open === true, width: size(kept.width), hover: size(kept.hover) } : null);
+  return new Promise((resolve) => {
+    try {
+      if (state === undefined || state === null) {
+        chrome.storage.local.get([INFOVIEW_PANEL_KEY], (res) => resolve({ state: chrome.runtime.lastError ? null : plain(res && res[INFOVIEW_PANEL_KEY]) }));
+        return;
+      }
+      const kept = plain(state);
+      if (!kept) { resolve({ state: null }); return; }
+      chrome.storage.local.set({ [INFOVIEW_PANEL_KEY]: kept }, () => resolve({ state: chrome.runtime.lastError ? null : kept }));
+    } catch (err) {
+      resolve({ state: null });
+    }
+  });
+}
+
+// Keys for the infoview's panels (see INFOVIEW_KEY), by the frame's name. Kept for the browser
+// session where the browser can, so that a worker restarted between the two askers gives both
+// the same key.
+const infoviewKeys = new Map();
+async function infoviewKey(id) {
+  if (typeof id !== 'string' || !/^[0-9a-f]{16,64}$/.test(id)) return { key: null };
+  const name = `infoview_key_${id}`;
+  const session = chrome.storage && chrome.storage.session;
+  if (!infoviewKeys.has(id)) {
+    infoviewKeys.set(id, (async () => {
+      const kept = session ? await new Promise((resolve) => session.get([name], (res) => resolve(chrome.runtime.lastError ? null : res && res[name]))) : null;
+      if (typeof kept === 'string') return kept;
+      const key = Array.from(crypto.getRandomValues(new Uint8Array(24)), (b) => b.toString(16).padStart(2, '0')).join('');
+      if (session) await new Promise((resolve) => session.set({ [name]: key }, () => resolve(chrome.runtime.lastError)));
+      return key;
+    })());
+    if (infoviewKeys.size > 200) infoviewKeys.delete(infoviewKeys.keys().next().value);
+  }
+  return { key: await infoviewKeys.get(id) };
+}
+
+/**
  * Message Dispatcher
  */
 /**
@@ -1848,6 +1912,14 @@ const MESSAGE_HANDLERS = {
   EXACT_HOVER: (request) => exactHover(request),
   // Ask the helper to run Lean on files of a commit (only ever after a click in the page).
   HELPER_RUN: (request) => helperRun(request),
+  // The key by which the infoview's panel knows the content script of its page (and not the
+  // page's own scripts, which cannot send messages here): one for each frame, given to both.
+  INFOVIEW_KEY: (request) => infoviewKey(request.id),
+  // How the infoview's panel was left: read, or kept when `state` is sent.
+  INFOVIEW_PANEL: (request) => infoviewPanel(request.state),
+  HELPER_LIVE: (request, sender) => helperForPanel(request, sender),
+  // The commit a pull request's page shows, when the page itself does not say (for the infoview).
+  PAGE_COMMIT: async (request) => ({ sha: request.fileRef ? await commitOf(request.fileRef) : null }),
   // A file's outline (with the scope commands), the declarations a PR adds, and hints for those.
   FILE_OUTLINE: async (request) => {
     const file = await fileOutline(request.fileRef);

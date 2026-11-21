@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Lean Lens infoview</title>
+  <link rel="stylesheet" href="host.css">
+</head>
+<body class="light">
+  <div id="bar">
+    <span id="dot" class="off"></span>
+    <span id="status">Lean is not running</span>
+    <button id="stop" hidden title="Stop Lean's server for this page">Stop</button>
+  </div>
+  <div id="notice" hidden></div>
+  <div id="intro">
+    <p id="intro-text"></p>
+    <p id="intro-detail" class="muted"></p>
+    <button id="start" hidden>Start Lean</button>
+  </div>
+  <div id="frame-holder" hidden></div>
+  <script src="host.js"></script>
+</body>
+</html>

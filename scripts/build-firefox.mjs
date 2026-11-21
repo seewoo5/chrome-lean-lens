@@ -5,7 +5,10 @@
  * The code is shared with Chrome unchanged; only the manifest differs:
  * Firefox runs the background as an event page (background.scripts) instead of
  * a service worker, so the files the service worker pulls in with importScripts
- * are listed there in the same order. Firefox also needs an add-on id.
+ * are listed there in the same order. Firefox also needs an add-on id, and has no sandboxed
+ * extension pages: the infoview's frame is sandboxed by the page that holds it instead.
+ *
+ * The infoview's own files (infoview/vendor/) are made by `npm install`: run that first.
  *
  *   node scripts/build-firefox.mjs          # writes dist/firefox/
  *   node scripts/build-firefox.mjs --zip    # also writes dist/lean-lens-firefox-<version>.zip
@@ -19,7 +22,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const out = path.join(root, 'dist', 'firefox');
 
 // What the extension itself is made of; the helper, tests and scripts stay out.
-const INCLUDE = ['background', 'content', 'icons', 'options', 'popup'];
+const INCLUDE = ['background', 'content', 'icons', 'infoview', 'options', 'popup'];
 const SKIP = /(?:^|\/)(?:\.DS_Store|__pycache__|.*\.py|.*\.pyc)$/;
 
 export function firefoxManifest(chrome) {
@@ -34,6 +37,14 @@ export function firefoxManifest(chrome) {
       'background/service_worker.js'
     ]
   };
+  // Chrome's sandboxed pages, and the rules it gives them: Firefox knows neither. There the
+  // infoview's frame runs under the rules of every extension page, which let no widget code
+  // in. And unlike Chrome, Firefox lets the panel's page show that frame without a web page
+  // being allowed to: so only the panel's page is open to GitHub's pages.
+  delete manifest.sandbox;
+  delete manifest.content_security_policy;
+  manifest.web_accessible_resources = (manifest.web_accessible_resources || []).map((entry) => (
+    { ...entry, resources: entry.resources.filter((resource) => resource !== 'infoview/frame.html') }));
   manifest.browser_specific_settings = {
     gecko: {
       id: 'lean-lens@seewoo5.github.io',
@@ -60,6 +71,10 @@ function build({ zip }) {
   const manifest = firefoxManifest(chrome);
   for (const file of manifest.background.scripts) {
     if (!fs.existsSync(path.join(root, file))) throw new Error(`Missing background script: ${file}`);
+  }
+
+  if (!fs.existsSync(path.join(root, 'infoview', 'vendor', 'infoview.js'))) {
+    console.warn('infoview/vendor/ is missing, so this build has no infoview. Run `npm install` first to include it.');
   }
 
   fs.rmSync(out, { recursive: true, force: true });

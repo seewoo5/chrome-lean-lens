@@ -10,7 +10,8 @@
     hoverDelay: 250,
     enablePRScanner: true,
     enableBuiltins: true,
-    showOutline: true
+    showOutline: true,
+    showInfoview: true
   };
 
   /** Show or hide the outline button for the Lean files on this page. */
@@ -22,6 +23,16 @@
       return;
     }
     panel.refresh();
+  }
+
+  /**
+   * Show or hide the infoview's tab: there when the local helper is in use (Lean's infoview
+   * needs Lean running) and the page has Lean files.
+   */
+  function refreshInfoview() {
+    const panel = window.LeanInfoviewPanel;
+    if (!panel) return;
+    panel.refresh(Boolean(settings.enabled && settings.enableHelper && settings.showInfoview !== false));
   }
 
   let hoverTimer = null;
@@ -43,6 +54,7 @@
         if (res && res.settings) {
           settings = Object.assign(settings, res.settings);
           refreshOutline();
+          refreshInfoview();
         }
       });
     } catch (err) {
@@ -60,6 +72,7 @@
       window.LeanPRScanner.scanPage();
       indexProjectFiles();
       refreshOutline();
+      refreshInfoview();
     }, 350);
   }
 
@@ -90,10 +103,12 @@
    */
   function initPRScanner() {
     refreshOutline();
+    refreshInfoview();
     if (!settings.enablePRScanner) return;
     window.LeanPRScanner.scanPage();
     indexProjectFiles();
     refreshOutline();
+    refreshInfoview();
 
     // Re-scan when GitHub mounts new virtualized diff chunks
     const observer = new MutationObserver((mutations) => {
@@ -1269,15 +1284,41 @@
   }
 
   /**
+   * The pointer went into the infoview's panel, where hovers are shown while it is open (the
+   * panel keeps its own mouse moves from `handleMouseMove`). A token crossed on the way there,
+   * or one still being looked up, does not replace the hover being read.
+   */
+  function leaveForPanel(e) {
+    const view = window.VersoTooltipView;
+    if (!view.dock || !e.target || !e.target.closest || !e.target.closest('.lean-infoview')) return;
+    if (hoverTimer) {
+      clearTimeout(hoverTimer);
+      hoverTimer = null;
+    }
+    if (loadingTimer) {
+      clearTimeout(loadingTimer);
+      loadingTimer = null;
+    }
+    lastHoveredToken = null;
+    lastHoveredRect = null;
+    lastHoveredSpot = null;
+    activeHover = null;
+    // (Takes away a lookup's loading bar; the hover shown stays.)
+    view.hide(false);
+  }
+
+  /**
    * Bind event listeners.
    */
   function initListeners() {
     document.addEventListener('mousemove', handleMouseMove, { passive: true });
+    document.addEventListener('mouseover', leaveForPanel, { passive: true });
 
     // Handle GitHub SPA soft navigations (Turbo / PJAX)
     const handleNavigation = () => {
       window.VersoTooltipView.hide(true);
       setTimeout(refreshOutline, 500);
+      setTimeout(refreshInfoview, 500);
       setTimeout(() => {
         initPRScanner();
       }, 500);
@@ -1313,7 +1354,7 @@
 
   // Exposed for the test suite.
   window.VersoContentInternals = { receiverFor, lookupContext, isInProse, isInAttribute, isInString, refineLocal, triggerTermLookup, versoState, inLeanNames,
-    triggerHoverLookup, exactCard, exactExtras, regionRanges, scrollBeside, isDeclKeyword, whereCard, setSettings: (values) => Object.assign(settings, values), hovering: (token) => { lastHoveredToken = token; } };
+    triggerHoverLookup, exactCard, exactExtras, regionRanges, scrollBeside, isDeclKeyword, whereCard, leaveForPanel, setSettings: (values) => Object.assign(settings, values), hovering: (token) => { lastHoveredToken = token; } };
 
   // Startup
   loadSettings();

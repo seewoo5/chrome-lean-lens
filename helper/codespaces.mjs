@@ -270,7 +270,7 @@ function explain(result) {
  *   `sandbox`: false when the reader accepted running without one (`--no-sandbox`);
  *   `keep`: leave codespaces running when they are idle and when the helper stops;
  *   `recordsDir`: the folder where the codespaces made for runs without a sandbox are noted.
- * @returns `{check, runJob, rest, shutdown, inventory, ours, stop, remove, tidy}`
+ * @returns `{check, runJob, request, notify, touch, rest, shutdown, inventory, ours, stop, remove, tidy}`
  */
 export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = true, keep = false, recordsDir = null, remotePort = REMOTE_PORT, cloneBase = null, pollMs = 1500, keepAliveMs = KEEP_ALIVE_MS, retryMs = 10 * 1000, machine = MACHINE, helperDir = here }) {
   if (!/^[A-Za-z0-9]+$/.test(machine)) throw new Error(`Not a codespace machine name: ${machine}`);
@@ -283,6 +283,7 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   const instance = randomBytes(8).toString('hex'); // this helper, among those that share `recordsDir`
   running.add(instance);
   if (!Array.isArray(config.retired)) config.retired = [];
+  let stopping = false;
 
   async function must(args, options) {
     const result = await run(gh, args, options);
@@ -358,7 +359,7 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   /** Set up and start the helper in a codespace (starting the codespace if it was stopped). */
   async function boot(name, repo, token, say) {
     const script = bootstrapScript({
-      files: Object.fromEntries(['lean-lens-helper.mjs', 'convert.mjs'].map((file) => [file, readFileSync(path.join(helperDir, file), 'utf8')])),
+      files: Object.fromEntries(['lean-lens-helper.mjs', 'convert.mjs', 'live.mjs'].map((file) => [file, readFileSync(path.join(helperDir, file), 'utf8')])),
       token, repo, port: remotePort, sandbox, cloneBase,
     });
     const result = await run(gh, ['codespace', 'ssh', '-c', name, '--', BOOT_COMMAND], {
@@ -500,6 +501,8 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
 
   /** The connection to a repository's codespace, made if there is none (or it went away). */
   function ensure(repo, say) {
+    // (Not once the helper is stopping: that would start a codespace it has just stopped.)
+    if (stopping) return Promise.reject(new Error('The helper is stopping'));
     const live = sessions.get(repo);
     if (live && live.tunnel.exitCode === null && live.tunnel.signalCode === null) return Promise.resolve(live);
     drop(repo);
@@ -642,6 +645,50 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   }
 
   /**
+   * A request to the helper in a repository's codespace, which is connected to first if it is
+   * not. When a request fails, the connection went (this machine slept, its network changed) or
+   * the codespace stopped. It is made again, a few times over: a network takes a moment to come
+   * back. The helper there is left running if it still is, and what it has under way with it.
+   *
+   * This is for what lasts longer than a run: Lean's server for the infoview (see live.mjs).
+   * Without a sandbox (`--no-sandbox`) there is no codespace for that: code is then run only in
+   * a codespace made for one run and deleted after it (see `runAlone`), never in the lasting one.
+   */
+  async function request(repo, say, method, pathname, body, timeoutMs) {
+    if (!sandbox) throw new Error(`With --no-sandbox, each run in a codespace gets a codespace of its own, deleted when the run is over, so Lean is not kept running in one for the infoview. To use the infoview on ${repo}, start the helper without --no-sandbox, or with --here ${repo}.`);
+    let session = await ensure(repo, say);
+    let failure = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await call(session, method, pathname, body, timeoutMs);
+      } catch (error) {
+        failure = error;
+      }
+      if (stopping) break;
+      drop(repo);
+      if (attempt) await sleep(retryMs * attempt);
+      try { session = await ensure(repo, say); } catch (error) { failure = error; }
+    }
+    throw failure;
+  }
+
+  /**
+   * Something said to the helper in a repository's codespace that need not arrive: sent if the
+   * codespace is connected, and not at all if it is not (no codespace is started for it).
+   */
+  async function notify(repo, pathname, body) {
+    const session = sessions.get(repo);
+    if (!session || stopping) return;
+    try { await call(session, 'POST', pathname, body, 10000); } catch { /* it need not arrive */ }
+  }
+
+  /** A sign of use for a repository's codespace, so GitHub does not stop it (see KEEP_ALIVE_MS). */
+  function touch(repo) {
+    const session = sessions.get(repo);
+    if (session) run(gh, ['codespace', 'ssh', '-c', session.name, '--', 'true'], { timeoutMs: 60 * 1000 });
+  }
+
+  /**
    * Run a job in a codespace: what the helper does itself when Lean is here.
    * `store(file, data)` and `fail(file, error)` take each file's outcome.
    */
@@ -666,6 +713,7 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
         } catch (error) {
           failure = error;
         }
+        if (stopping) break;
         link.close();
         if (attempt) await sleep(retryMs * attempt);
         try { session = await link.open(); } catch (error) { failure = error; }
@@ -719,6 +767,7 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
   /** When the helper stops: close the connections, and stop the codespaces it was using. */
   function shutdown() {
     running.delete(instance);
+    stopping = true;
     for (const [repo, session] of [...sessions]) {
       drop(repo);
       if (keep) continue;
@@ -748,5 +797,5 @@ export function createCodespaces({ config, save, run, log, gh = 'gh', sandbox = 
     forgetNote(name);
   }
 
-  return { check, runJob, rest, shutdown, inventory, ours, stop, remove, tidy, run };
+  return { check, runJob, request, notify, touch, rest, shutdown, inventory, ours, stop, remove, tidy, run };
 }

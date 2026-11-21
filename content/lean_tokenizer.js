@@ -25,6 +25,9 @@
   // (Mathlib's scoped notations for constants, longest first: `ℝ≥0∞` before `ℝ≥0`).
   const SYMBOL_NOTATIONS = ["ℕ∪{∞}", "log⁺", "ℝ≥0∞", "d⁄dX", "ℝ≥0", "𝕔𝔻", "𝓕⁻", "∂L", "∂R", "𝒅ₕ", "D∃", "𝒟ᵒ", "𝓝ˢ", "Ω^", "∇", "𝐞", "𝔻", "𝓕", "𝟭", "𝒮", "∡", "∠", "𝑳", "𝑹", "𝒅", "𝕋", "𝒟", "𝓞", "𝓟", "𝔠", "∞", "𝓝", "𝓤"];
 
+  // The elements that hold one line of code, in GitHub's diff and file views.
+  const LINE_CONTAINERS = '.blob-code-inner, .react-code-text, [data-code-text], td.blob-code, [data-tag="diff-line"], pre, code';
+
   class LeanTokenizer {
     /**
      * Check if a character is part of a Lean identifier.
@@ -214,9 +217,7 @@
       }
 
       // 1. Try resolving using full code line container (handles multi-span dotted tokens)
-      const lineContainer = event.target.closest(
-        '.blob-code-inner, .react-code-text, [data-code-text], td.blob-code, [data-tag="diff-line"], pre, code'
-      ) || textNode.parentElement;
+      const lineContainer = event.target.closest(LINE_CONTAINERS) || textNode.parentElement;
 
       if (lineContainer && range) {
         try {
@@ -267,6 +268,33 @@
 
       // 2. Fallback to single textNode extractor
       return this.extractTokenAt(textNode, offset, event.clientX, event.clientY);
+    }
+
+    /**
+     * Where a click is in a line of code: `{ container, offset, textNode }`, with `offset`
+     * counted in the text of the line's container (a diff marker included, as `markerLength`
+     * says); or null when the point is not in a line of code. A point past the end of a line
+     * is the end of that line.
+     */
+    static caretFromEvent(event) {
+      let node = null;
+      let offset = 0;
+      if (document.caretRangeFromPoint) {
+        const range = document.caretRangeFromPoint(event.clientX, event.clientY);
+        if (range) { node = range.startContainer; offset = range.startOffset; }
+      } else if (document.caretPositionFromPoint) {
+        const pos = document.caretPositionFromPoint(event.clientX, event.clientY);
+        if (pos) { node = pos.offsetNode; offset = pos.offset; }
+      }
+      if (!node) return null;
+      const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+      const container = (el && el.closest && el.closest(LINE_CONTAINERS)) ||
+        (event.target && event.target.closest && event.target.closest(LINE_CONTAINERS));
+      if (!container || !container.contains(node)) return null;
+      const before = document.createRange();
+      before.selectNodeContents(container);
+      before.setEnd(node, offset);
+      return { container, offset: before.toString().length, textNode: node };
     }
 
     /**

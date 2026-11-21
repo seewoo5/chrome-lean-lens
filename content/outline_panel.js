@@ -158,12 +158,12 @@
       }
     }
 
-    /** The page's Lean file nearest the middle of the window, or null. */
-    fileInView() {
+    /** The page's Lean file (of `files`, each with a `path`) nearest the middle of the window, or null. */
+    fileInView(files = this.files) {
       const middle = window.innerHeight / 2;
       let best = null;
       let bestDistance = Infinity;
-      for (const file of this.files) {
+      for (const file of files) {
         for (const el of fileContainers(file.path)) {
           const r = el.getBoundingClientRect();
           if (!r.height) continue;
@@ -267,7 +267,12 @@
 
     /** Scroll to a line when the page shows it, else open it on GitHub. */
     goTo(line) {
-      const file = this.current;
+      // (The commit the file was read at: the page does not always say.)
+      this.reveal(this.current, line, (this.data && this.data.sha) || this.current.sha);
+    }
+
+    /** The same for a line of any file (`{owner, repo, pr?, path}`) at a commit. */
+    reveal(file, line, sha) {
       const el = lineElement(file, line);
       if (el) {
         // (At once: a smooth scroll is cut short by any other scrolling.)
@@ -276,8 +281,6 @@
         setTimeout(() => el.classList.remove('verso-highlight-target'), 2500);
         return;
       }
-      // (The commit the file was read at: the page does not always say.)
-      const sha = (this.data && this.data.sha) || file.sha;
       const path = file.path.split('/').map(encodeURIComponent).join('/');
       const url = sha ? `https://github.com/${file.owner}/${file.repo}/blob/${sha}/${path}#L${line}`
         : `https://github.com/${file.owner}/${file.repo}/pull/${file.pr}/files`;
